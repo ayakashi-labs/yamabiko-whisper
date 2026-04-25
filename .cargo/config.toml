@@ -1,0 +1,20 @@
+# Windows + Visual Studio 18 Insiders + Vulkan ビルド向け設定
+# Build settings for Windows + Visual Studio 18 Insiders + Vulkan.
+#
+# 前提: vcvars64.bat を読み込んだシェルから cargo を呼び出すこと
+# Prerequisite: invoke cargo from a shell where vcvars64.bat has been sourced.
+#   例 / Example:
+#     & cmd /c '"...\VC\Auxiliary\Build\vcvars64.bat" && cargo build'
+
+[build]
+# whisper-rs-sys の vulkan-shaders-gen 内部パスが CMake の 250 文字制限を超えるため短縮
+# Shorten target dir; vulkan-shaders-gen internal paths exceed CMake's 250-char limit.
+target-dir = "C:/law-t"
+
+[env]
+# VS 18 Insiders の MSBuild は vulkan-shaders-gen の ExternalProject ビルドで失敗するため Ninja を使う
+# MSBuild on VS 18 Insiders fails for vulkan-shaders-gen ExternalProject; switch to Ninja.
+CMAKE_GENERATOR = "Ninja"
+# 並列 cl.exe による vc140.pdb 同時書き込み (C1041) を回避するため直列化
+# Serialize cl.exe invocations to avoid concurrent vc140.pdb writes (C1041).
+CMAKE_BUILD_PARALLEL_LEVEL = "1"
