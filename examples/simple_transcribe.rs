@@ -6,9 +6,8 @@ fn main() {
     let path_to_audio = std::env::args().nth(2).unwrap();
 
     // load a context and model
-    let ctx =
-        WhisperContext::new_with_params(path_to_model, WhisperContextParameters::default())
-            .expect("failed to load model");
+    let ctx = WhisperContext::new_with_params(path_to_model, WhisperContextParameters::default())
+        .expect("failed to load model");
 
     // create a params object
     let mut params = FullParams::new(SamplingStrategy::BeamSearch {
@@ -16,6 +15,17 @@ fn main() {
         patience: -1.0,
     });
     params.set_language(Some("auto"));
+
+    // use available parallelism for CPU-side work
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
+    params.set_n_threads(n_threads);
+
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_print_special(false);
 
     // load audio from a 16-bit PCM, 16KHz, mono WAV file
     let audio_data: Vec<f32> = WavReader::open(&path_to_audio)
