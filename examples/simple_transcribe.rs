@@ -1,61 +1,44 @@
-use hound::{SampleFormat, WavReader};
+use hound::WavReader;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-// 引数 / Args: <model.bin> <audio.wav>
 fn main() {
-    let model_path = std::env::args().nth(1).expect("model path required");
-    let audio_path = std::env::args().nth(2).expect("audio path required");
+    let path_to_model = std::env::args().nth(1).unwrap();
+    let path_to_audio = std::env::args().nth(2).unwrap();
 
-    // 16kHz mono の WAV のみ受け付ける
-    // Only 16kHz mono WAV is accepted.
-    let mut reader = WavReader::open(&audio_path).expect("failed to open wav");
-    let spec = reader.spec();
-    assert_eq!(spec.sample_rate, 16_000, "sample rate must be 16kHz");
-    assert_eq!(spec.channels, 1, "audio must be mono");
+    // load a context and model
+    let ctx =
+        WhisperContext::new_with_params(path_to_model, WhisperContextParameters::default())
+            .expect("failed to load model");
 
-    // PCM/float サンプルを f32 [-1.0, 1.0] に正規化
-    // Normalize PCM/float samples to f32 in [-1.0, 1.0].
-    let audio: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
-        (SampleFormat::Int, 16) => reader
-            .samples::<i16>()
-            .map(|s| s.unwrap() as f32 / i16::MAX as f32)
-            .collect(),
-        (SampleFormat::Int, 32) => reader
-            .samples::<i32>()
-            .map(|s| s.unwrap() as f32 / i32::MAX as f32)
-            .collect(),
-        (SampleFormat::Float, 32) => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
-        _ => panic!("unsupported sample format"),
-    };
-
-    // Vulkan GPU バックエンドを使用
-    // Use Vulkan GPU backend.
-    let mut cparams = WhisperContextParameters::default();
-    cparams.use_gpu(true).gpu_device(0);
-    let ctx = WhisperContext::new_with_params(&model_path, cparams).expect("failed to load model");
-
-    // "auto" 指定は multilingual モデルが必須
-    // "auto" requires a multilingual model.
+    // create a params object
     let mut params = FullParams::new(SamplingStrategy::BeamSearch {
         beam_size: 5,
         patience: -1.0,
     });
     params.set_language(Some("auto"));
-    params.set_print_progress(false);
-    params.set_print_special(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
 
+    // load audio from a 16-bit PCM, 16KHz, mono WAV file
+    let audio_data: Vec<f32> = WavReader::open(&path_to_audio)
+        .expect("failed to open wav")
+        .samples::<i16>()
+        .map(|s| s.unwrap() as f32 / i16::MAX as f32)
+        .collect();
+
+    // now we can run the model
     let mut state = ctx.create_state().expect("failed to create state");
-    state.full(params, &audio[..]).expect("failed to run model");
+    state
+        .full(params, &audio_data[..])
+        .expect("failed to run model");
 
-    // タイムスタンプはセンチ秒 (10ms 単位)
-    // Timestamps are in centiseconds (10ms units).
+    // fetch the results
     for segment in state.as_iter() {
         println!(
             "[{} - {}]: {}",
+            // note start and end timestamps are in centiseconds
+            // (10s of milliseconds)
             segment.start_timestamp(),
             segment.end_timestamp(),
+            // the Display impl for WhisperSegment will replace invalid UTF-8 with the Unicode replacement character
             segment
         );
     }
