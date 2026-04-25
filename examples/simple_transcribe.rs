@@ -4,6 +4,9 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 fn main() {
     let path_to_model = std::env::args().nth(1).unwrap();
     let path_to_audio = std::env::args().nth(2).unwrap();
+    let language = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "auto".to_string());
 
     // load a context and model
     let ctx = WhisperContext::new_with_params(path_to_model, WhisperContextParameters::default())
@@ -14,7 +17,7 @@ fn main() {
         beam_size: 5,
         patience: -1.0,
     });
-    params.set_language(Some("auto"));
+    params.set_language(Some(&language));
 
     // use available parallelism for CPU-side work
     let n_threads = std::thread::available_parallelism()
