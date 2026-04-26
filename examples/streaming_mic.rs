@@ -7,7 +7,9 @@
 //!         -> on-line linear-interpolation resampler to 16 kHz
 //!         -> optional Silero VAD gate (whisper.cpp's built-in)
 //!         -> OnlineAsrProcessor (~1.0 s of new audio per pass)
-//!         -> committed words printed as `[<start>-<end>] <text>` (stdout)
+//!         -> committed words printed as `[<start> - <end>]: <text>` in
+//!            centiseconds, matching the simple_transcribe example
+//!            (stdout)
 //!         -> tentative hypothesis rendered with `\r` overlay (stderr)
 //!
 //! Usage:
@@ -231,7 +233,7 @@ fn main() -> Result<()> {
                     }
                     if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
                         let joined = join_words(&final_words, processor.sep());
-                        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
+                        println!("[{} - {}]: {}", to_cs(first.start), to_cs(last.end), joined);
                         let _ = std::io::stdout().flush();
                     }
                     let next_offset = total_audio_sec + chunk_len as f64 / TARGET_SR as f64;
@@ -264,10 +266,16 @@ fn main() -> Result<()> {
     }
     if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
         let joined = join_words(&final_words, processor.sep());
-        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
+        println!("[{} - {}]: {}", to_cs(first.start), to_cs(last.end), joined);
     }
 
     Ok(())
+}
+
+/// Convert a seconds-valued timestamp to centiseconds (10 ms units), the
+/// same unit `simple_transcribe.rs` prints.
+fn to_cs(sec: f64) -> i64 {
+    (sec * 100.0).round() as i64
 }
 
 /// Run the Silero VAD over a 16 kHz mono f32 chunk and return true if any
@@ -306,9 +314,10 @@ fn join_words(words: &[Word], sep: &str) -> String {
 
 /// Print just-committed words as a new line; redraw the tentative overlay
 /// underneath so the user always sees both: a stable history above and a
-/// moving prediction below. The committed line is formatted as
-/// `[start-end] text` using the timestamps of the first and last word
-/// in the batch.
+/// moving prediction below. Committed lines use the same
+/// `[<start> - <end>]: <text>` centisecond format as
+/// `simple_transcribe.rs`, taking the start of the first and end of the
+/// last word in the batch.
 fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible: &mut bool) {
     if let (Some(first), Some(last)) = (committed.first(), committed.last()) {
         // Erase the tentative line first so the new committed line lands
@@ -318,7 +327,7 @@ fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible
             *tentative_visible = false;
         }
         let joined = join_words(committed, sep);
-        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
+        println!("[{} - {}]: {}", to_cs(first.start), to_cs(last.end), joined);
         let _ = std::io::stdout().flush();
     }
 
