@@ -36,16 +36,30 @@ impl OnlineAsrProcessor {
     /// Create a processor backed by `ctx`. `language` is the Whisper
     /// language code (`"en"`, `"ja"`, …) or `"auto"` for autodetect.
     pub fn new(ctx: &WhisperContext, language: &str) -> Self {
+        Self::with_offset(ctx, language, 0.0)
+    }
+
+    /// Same as [`Self::new`] but starts the processor's clock at `offset`
+    /// seconds. Useful when rebuilding a processor mid-stream (e.g. after
+    /// an utterance boundary detected by VAD) so subsequent committed
+    /// timestamps stay continuous with prior output instead of resetting
+    /// to 0.
+    pub fn with_offset(ctx: &WhisperContext, language: &str, offset: f64) -> Self {
         let state = ctx.create_state().expect("failed to create whisper state");
         let n_threads = std::thread::available_parallelism()
             .map(|n| n.get() as i32)
             .unwrap_or(4);
         let sep = if is_cjk(language) { "" } else { " " };
+        let mut transcript_buffer = HypothesisBuffer::new();
+        // Mirror the reference implementation's `init(offset=...)`: seed
+        // last_committed_time so the start-time filter in `insert` does
+        // not let in stale words from an earlier session.
+        transcript_buffer.last_committed_time = offset;
         Self {
             state,
             audio_buffer: Vec::new(),
-            buffer_time_offset: 0.0,
-            transcript_buffer: HypothesisBuffer::new(),
+            buffer_time_offset: offset,
+            transcript_buffer,
             committed: Vec::new(),
             sep,
             language: language.to_string(),

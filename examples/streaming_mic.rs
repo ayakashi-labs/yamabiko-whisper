@@ -7,7 +7,7 @@
 //!         -> on-line linear-interpolation resampler to 16 kHz
 //!         -> optional Silero VAD gate (whisper.cpp's built-in)
 //!         -> OnlineAsrProcessor (~1.0 s of new audio per pass)
-//!         -> committed words printed as `[<sec>] <text>` (stdout)
+//!         -> committed words printed as `[<start>-<end>] <text>` (stdout)
 //!         -> tentative hypothesis rendered with `\r` overlay (stderr)
 //!
 //! Usage:
@@ -180,6 +180,11 @@ fn main() -> Result<()> {
     // Whether the processor currently holds any active speech. Drives the
     // utterance-end reset and the final-flush behaviour at Ctrl-C.
     let mut speaking = false;
+    // Total seconds of audio observed since program start. Every chunk
+    // (speech or silence) advances this counter, and it is used as the
+    // offset for any rebuilt processor so committed timestamps remain
+    // continuous across utterance resets instead of restarting at 0.
+    let mut total_audio_sec: f64 = 0.0;
     let silence_reset_samples = (SILENCE_RESET_SEC * TARGET_SR as f64) as usize;
 
     while running.load(Ordering::SeqCst) {
@@ -216,23 +221,26 @@ fn main() -> Result<()> {
                 silence_samples += chunk_len;
                 if silence_samples >= silence_reset_samples {
                     // End-of-utterance: flush any tentative words, then
-                    // build a fresh processor so the next utterance has a
-                    // clean timeline and no carry-over hypothesis.
+                    // build a fresh processor seeded with the current
+                    // wall-clock offset so the next utterance picks up
+                    // where this one left off on the timeline.
                     let final_words = processor.finish();
                     if tentative_visible {
                         eprint!("\r\x1b[K");
                         tentative_visible = false;
                     }
-                    if let Some(first) = final_words.first() {
+                    if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
                         let joined = join_words(&final_words, processor.sep());
-                        println!("[{:.2}] {}", first.start, joined);
+                        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
                         let _ = std::io::stdout().flush();
                     }
-                    processor = OnlineAsrProcessor::new(&ctx, &language);
+                    let next_offset = total_audio_sec + chunk_len as f64 / TARGET_SR as f64;
+                    processor = OnlineAsrProcessor::with_offset(&ctx, &language, next_offset);
                     silence_samples = 0;
                     speaking = false;
                 }
             }
+            total_audio_sec += chunk_len as f64 / TARGET_SR as f64;
             pending.clear();
         }
     }
@@ -254,9 +262,9 @@ fn main() -> Result<()> {
         // Wipe the in-flight overlay before the final committed line.
         eprint!("\r\x1b[K");
     }
-    if let Some(first) = final_words.first() {
+    if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
         let joined = join_words(&final_words, processor.sep());
-        println!("[{:.2}] {}", first.start, joined);
+        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
     }
 
     Ok(())
@@ -298,9 +306,11 @@ fn join_words(words: &[Word], sep: &str) -> String {
 
 /// Print just-committed words as a new line; redraw the tentative overlay
 /// underneath so the user always sees both: a stable history above and a
-/// moving prediction below.
+/// moving prediction below. The committed line is formatted as
+/// `[start-end] text` using the timestamps of the first and last word
+/// in the batch.
 fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible: &mut bool) {
-    if !committed.is_empty() {
+    if let (Some(first), Some(last)) = (committed.first(), committed.last()) {
         // Erase the tentative line first so the new committed line lands
         // on its own row instead of being prepended to the overlay text.
         if *tentative_visible {
@@ -308,8 +318,7 @@ fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible
             *tentative_visible = false;
         }
         let joined = join_words(committed, sep);
-        let start = committed.first().map(|w| w.start).unwrap_or(0.0);
-        println!("[{start:.2}] {joined}");
+        println!("[{:.2}-{:.2}] {}", first.start, last.end, joined);
         let _ = std::io::stdout().flush();
     }
 
