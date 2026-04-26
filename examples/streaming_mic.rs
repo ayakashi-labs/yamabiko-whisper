@@ -5,26 +5,27 @@
 //!         -> per-callback mono mix + sample-format conversion to f32
 //!         -> std::sync::mpsc to the main thread
 //!         -> on-line linear-interpolation resampler to 16 kHz
-//!         -> optional Silero VAD gate (whisper.cpp's built-in)
 //!         -> OnlineAsrProcessor (~1.0 s of new audio per pass)
-//!         -> committed words printed as `[<start> - <end>]: <text>` in
-//!            centiseconds, matching the simple_transcribe example
-//!            (stdout)
+//!         -> committed words printed as `[<start> - <end>]: <text>`
+//!            in centiseconds (stdout)
 //!         -> tentative hypothesis rendered with `\r` overlay (stderr)
 //!
 //! Usage:
 //!     cargo run --release --example streaming_mic -- \
 //!         <model.bin> [language=auto] [vad-model.bin]
 //!
-//! When a VAD model path is provided, silent chunks are dropped and the
-//! Whisper processor is reset after a short trailing silence so the next
-//! utterance starts with a fresh `[0.00]` timeline. Without a VAD model
-//! the processor consumes every chunk (which is what the paper describes
-//! but tends to hallucinate on long silences when running off a live
-//! microphone).
+//! The optional VAD model path enables Silero VAD inside the
+//! processor: silent chunks are dropped and the Whisper state is
+//! reset after a short trailing silence so the next utterance starts
+//! with a fresh decoder timeline. Without it every chunk is forwarded
+//! to Whisper directly.
 //!
-//! Press Ctrl-C to stop. The processor's tentative buffer is then flushed
-//! once and printed as a final committed line.
+//! Press Ctrl-C to stop. The processor's tentative buffer is then
+//! flushed once and printed as a final committed line.
+//!
+//! Note: this example never imports `whisper_rs` — everything that
+//! used to require it (model loading, VAD context, log hooks) is now
+//! exposed through `local_agreement_whisper`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -35,27 +36,20 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
-use whisper_rs::{
-    WhisperContext, WhisperContextParameters, WhisperVadContext, WhisperVadContextParams,
-    WhisperVadParams, install_logging_hooks,
-};
 
-use local_agreement_whisper::{OnlineAsrProcessor, Word};
+use local_agreement_whisper::{OnlineAsrProcessor, VadConfig, Word, install_log_hooks};
 
 /// Run a Whisper pass once we have at least this many seconds of new audio.
 const MIN_CHUNK_SEC: f64 = 1.0;
 /// Target sampling rate for whisper.cpp (fixed by the model).
 const TARGET_SR: u32 = 16_000;
-/// Trailing silence (in seconds) that ends an utterance and resets the
-/// streaming processor. Only used when a VAD model is supplied.
-const SILENCE_RESET_SEC: f64 = 2.0;
 
 fn main() -> Result<()> {
-    // Route whisper.cpp / GGML / VAD logs through whisper-rs's logging
-    // hooks. Without a `log` or `tracing` backend wired up they are
-    // silently dropped, which is what we want here — those logs would
-    // otherwise spam stderr several times per second.
-    install_logging_hooks();
+    // Route whisper.cpp / GGML / VAD logs through a `log` / `tracing`
+    // backend. With no backend wired up they get dropped, which is
+    // what we want here — those logs would otherwise spam stderr
+    // several times per second.
+    install_log_hooks();
 
     let mut args = std::env::args().skip(1);
     let model_path = args.next().ok_or_else(|| {
@@ -65,26 +59,19 @@ fn main() -> Result<()> {
     let vad_model_path = args.next();
 
     eprintln!("loading model: {model_path}");
-    let ctx = WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
-        .map_err(|e| anyhow!("failed to load whisper model: {e}"))?;
-    let mut processor = OnlineAsrProcessor::new(&ctx, &language);
-
-    let mut vad = match vad_model_path.as_deref() {
-        Some(path) => {
-            eprintln!("loading VAD model: {path}");
-            let mut vad_params = WhisperVadContextParams::default();
-            vad_params.set_n_threads(
-                std::thread::available_parallelism()
-                    .map(|n| n.get() as i32)
-                    .unwrap_or(4),
-            );
-            let ctx = WhisperVadContext::new(path, vad_params)
-                .map_err(|e| anyhow!("failed to load VAD model: {e}"))?;
-            Some(ctx)
+    let mut processor = match vad_model_path.as_deref() {
+        Some(vad_path) => {
+            eprintln!("loading VAD model: {vad_path}");
+            OnlineAsrProcessor::from_model_path_with_vad(
+                &model_path,
+                &language,
+                vad_path,
+                VadConfig::default(),
+            )?
         }
         None => {
             eprintln!("no VAD model supplied; passing every chunk through Whisper");
-            None
+            OnlineAsrProcessor::from_model_path(&model_path, &language)?
         }
     };
 
@@ -175,23 +162,10 @@ fn main() -> Result<()> {
     let mut pending: Vec<f32> = Vec::new();
     let min_samples = (MIN_CHUNK_SEC * TARGET_SR as f64) as usize;
     let mut tentative_visible = false;
-    // Number of consecutive silent samples at 16 kHz; only meaningful when
-    // VAD is on. Used to decide when an utterance has ended so we can wipe
-    // the processor state before the next one begins.
-    let mut silence_samples: usize = 0;
-    // Whether the processor currently holds any active speech. Drives the
-    // utterance-end reset and the final-flush behaviour at Ctrl-C.
-    let mut speaking = false;
-    // Total seconds of audio observed since program start. Every chunk
-    // (speech or silence) advances this counter, and it is used as the
-    // offset for any rebuilt processor so committed timestamps remain
-    // continuous across utterance resets instead of restarting at 0.
-    let mut total_audio_sec: f64 = 0.0;
-    let silence_reset_samples = (SILENCE_RESET_SEC * TARGET_SR as f64) as usize;
 
     while running.load(Ordering::SeqCst) {
-        // Drain everything currently queued, with a short wait so the loop
-        // does not spin when the mic is silent.
+        // Drain everything currently queued, with a short wait so the
+        // loop does not spin when the mic is silent.
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => pending.extend(resampler.process(&chunk)),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -202,56 +176,23 @@ fn main() -> Result<()> {
         }
 
         if pending.len() >= min_samples {
-            let chunk_len = pending.len();
-            let has_speech = match vad.as_mut() {
-                Some(vad_ctx) => chunk_contains_speech(vad_ctx, &pending)?,
-                None => true,
-            };
-
-            if has_speech {
-                processor.insert_audio_chunk(&pending);
-                let committed = processor.process_iter();
-                render(
-                    &committed,
-                    processor.tentative(),
-                    processor.sep(),
-                    &mut tentative_visible,
-                );
-                silence_samples = 0;
-                speaking = true;
-            } else if speaking {
-                silence_samples += chunk_len;
-                if silence_samples >= silence_reset_samples {
-                    // End-of-utterance: flush any tentative words, then
-                    // build a fresh processor seeded with the current
-                    // wall-clock offset so the next utterance picks up
-                    // where this one left off on the timeline.
-                    let final_words = processor.finish();
-                    if tentative_visible {
-                        eprint!("\r\x1b[K");
-                        tentative_visible = false;
-                    }
-                    if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
-                        let joined = join_words(&final_words, processor.sep());
-                        println!("[{} - {}]: {}", to_cs(first.start), to_cs(last.end), joined);
-                        let _ = std::io::stdout().flush();
-                    }
-                    let next_offset = total_audio_sec + chunk_len as f64 / TARGET_SR as f64;
-                    processor = OnlineAsrProcessor::with_offset(&ctx, &language, next_offset);
-                    silence_samples = 0;
-                    speaking = false;
-                }
-            }
-            total_audio_sec += chunk_len as f64 / TARGET_SR as f64;
+            processor.insert_audio_chunk(&pending)?;
+            let committed = processor.process_iter()?;
+            render(
+                &committed,
+                processor.tentative(),
+                processor.sep(),
+                &mut tentative_visible,
+            );
             pending.clear();
         }
     }
 
     // Stop capture and flush whatever remains.
     drop(stream);
-    if !pending.is_empty() && speaking {
-        processor.insert_audio_chunk(&pending);
-        let committed = processor.process_iter();
+    if !pending.is_empty() {
+        processor.insert_audio_chunk(&pending)?;
+        let committed = processor.process_iter()?;
         render(
             &committed,
             processor.tentative(),
@@ -272,25 +213,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Convert a seconds-valued timestamp to centiseconds (10 ms units), the
-/// same unit `simple_transcribe.rs` prints.
+/// Convert a seconds-valued timestamp to centiseconds (10 ms units),
+/// matching the format printed by `simple_transcribe.rs`.
 fn to_cs(sec: f64) -> i64 {
     (sec * 100.0).round() as i64
 }
 
-/// Run the Silero VAD over a 16 kHz mono f32 chunk and return true if any
-/// speech segment was detected. Uses default `WhisperVadParams` which
-/// match whisper.cpp's recommended settings (250 ms min speech, 100 ms min
-/// silence, 0.5 probability threshold).
-fn chunk_contains_speech(vad: &mut WhisperVadContext, samples: &[f32]) -> Result<bool> {
-    let segments = vad
-        .segments_from_samples(WhisperVadParams::default(), samples)
-        .map_err(|e| anyhow!("VAD failed: {e}"))?;
-    Ok(segments.num_segments() > 0)
-}
-
-/// Convert any cpal sample type to f32 and average all channels into one
-/// mono frame. Channel count of 0 should not happen in practice.
+/// Convert any cpal sample type to f32 and average all channels into
+/// one mono frame. Channel count of 0 should not happen in practice.
 fn downmix<T>(data: &[T], channels: usize) -> Vec<f32>
 where
     T: cpal::SizedSample,
@@ -312,16 +242,17 @@ fn join_words(words: &[Word], sep: &str) -> String {
     parts.join(sep)
 }
 
-/// Print just-committed words as a new line; redraw the tentative overlay
-/// underneath so the user always sees both: a stable history above and a
-/// moving prediction below. Committed lines use the same
+/// Print just-committed words as a new line; redraw the tentative
+/// overlay underneath so the user always sees both: a stable history
+/// above and a moving prediction below. Committed lines use the same
 /// `[<start> - <end>]: <text>` centisecond format as
-/// `simple_transcribe.rs`, taking the start of the first and end of the
-/// last word in the batch.
+/// `simple_transcribe.rs`, taking the start of the first and end of
+/// the last word in the batch.
 fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible: &mut bool) {
     if let (Some(first), Some(last)) = (committed.first(), committed.last()) {
-        // Erase the tentative line first so the new committed line lands
-        // on its own row instead of being prepended to the overlay text.
+        // Erase the tentative line first so the new committed line
+        // lands on its own row instead of being prepended to the
+        // overlay text.
         if *tentative_visible {
             eprint!("\r\x1b[K");
             *tentative_visible = false;
@@ -331,8 +262,8 @@ fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible
         let _ = std::io::stdout().flush();
     }
 
-    // Re-draw tentative hypothesis on stderr so it stays visually distinct
-    // from the committed stdout history.
+    // Re-draw tentative hypothesis on stderr so it stays visually
+    // distinct from the committed stdout history.
     if !tentative.is_empty() {
         let joined = join_words(&tentative, sep);
         eprint!("\r  …(tentative): {joined}\x1b[K");
@@ -346,10 +277,11 @@ fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible
 }
 
 /// Tiny streaming linear-interpolation resampler. Quality is more than
-/// adequate for ASR: speech energy lives below 4 kHz and Whisper expects
-/// a 16 kHz log-mel spectrogram, so anti-aliasing is taken care of by
-/// the model's own front-end. Keeps one sample of state across calls so
-/// the interpolation is continuous at chunk boundaries.
+/// adequate for ASR: speech energy lives below 4 kHz and Whisper
+/// expects a 16 kHz log-mel spectrogram, so anti-aliasing is taken
+/// care of by the model's own front-end. Keeps one sample of state
+/// across calls so the interpolation is continuous at chunk
+/// boundaries.
 struct LinearResampler {
     ratio: f64,
     pos: f64,
