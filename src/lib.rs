@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Streaming speech recognition on top of `whisper-rs`, using the
+//! LocalAgreement-2 policy from Macháček et al. 2023.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod hypothesis_buffer;
+pub mod online_asr;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use hypothesis_buffer::{HypothesisBuffer, Word};
+pub use online_asr::OnlineAsrProcessor;

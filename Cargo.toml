@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+cpal = "0.17.3"
+ctrlc = "3.5.2"
 hound = "3.5.1"
 whisper-rs = { version = "0.16.0", features = ["vulkan"] }
