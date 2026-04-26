@@ -213,8 +213,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Convert a seconds-valued timestamp to centiseconds (10 ms units),
-/// matching the format printed by `simple_transcribe.rs`.
+/// Convert a seconds-valued timestamp to centiseconds (10 ms units).
 fn to_cs(sec: f64) -> i64 {
     (sec * 100.0).round() as i64
 }
@@ -244,10 +243,9 @@ fn join_words(words: &[Word], sep: &str) -> String {
 
 /// Print just-committed words as a new line; redraw the tentative
 /// overlay underneath so the user always sees both: a stable history
-/// above and a moving prediction below. Committed lines use the same
-/// `[<start> - <end>]: <text>` centisecond format as
-/// `simple_transcribe.rs`, taking the start of the first and end of
-/// the last word in the batch.
+/// above and a moving prediction below. Committed lines use the
+/// `[<start> - <end>]: <text>` centisecond format, taking the start
+/// of the first and end of the last word in the batch.
 fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible: &mut bool) {
     if let (Some(first), Some(last)) = (committed.first(), committed.last()) {
         // Erase the tentative line first so the new committed line
