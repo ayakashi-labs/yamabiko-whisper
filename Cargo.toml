@@ -2,9 +2,24 @@
 name = "local-agreement-whisper"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Low-latency streaming speech recognition with whisper.cpp and LocalAgreement-2."
+license = "MIT"
+repository = "https://github.com/ItokawaHub/local-agreement-whisper"
+documentation = "https://docs.rs/local-agreement-whisper"
+readme = "README.md"
+keywords = ["whisper", "asr", "speech", "streaming", "local-agreement"]
+categories = ["multimedia::audio", "api-bindings"]
+exclude = [".cargo/"]
+
+[features]
+default = []
+vulkan = ["whisper-rs/vulkan"]
 
 [dependencies]
+whisper-rs = "0.16.0"
+
+[dev-dependencies]
 anyhow = "1.0.102"
 cpal = "0.17.3"
 ctrlc = "3.5.2"
-whisper-rs = { version = "0.16.0", features = ["vulkan"] }

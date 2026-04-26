@@ -8,12 +8,12 @@
 //! and pull committed words out with
 //! [`OnlineAsrProcessor::process_iter`].
 
-pub mod error;
-pub mod hypothesis_buffer;
-pub mod online_asr;
+mod error;
+mod hypothesis_buffer;
+mod online_asr;
 
 pub use error::Error;
-pub use hypothesis_buffer::{HypothesisBuffer, Word};
+pub use hypothesis_buffer::Word;
 pub use online_asr::{OnlineAsrProcessor, VadConfig};
 
 /// Forward whisper.cpp / GGML / VAD logs to a `log` / `tracing`

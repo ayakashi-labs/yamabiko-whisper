@@ -10,6 +10,7 @@ use std::fmt;
 
 /// All failures surfaced by `local_agreement_whisper`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Loading the Whisper model file failed (path missing, bad format,
     /// GGML init failure, etc.).

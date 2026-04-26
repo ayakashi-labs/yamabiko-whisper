@@ -1,4 +1,4 @@
-//! Streaming Whisper processor that drives a [`HypothesisBuffer`].
+//! Streaming Whisper processor that drives an internal hypothesis buffer.
 //!
 //! Mirrors the `OnlineASRProcessor` in `ufal/whisper_streaming`: holds a
 //! rolling 16 kHz f32 audio buffer, runs Whisper on the whole buffer
@@ -195,7 +195,7 @@ impl OnlineAsrProcessor {
     /// VAD enabled the chunk is first classified: silent chunks are
     /// dropped, and once trailing silence has accumulated past
     /// `silence_reset_sec` a reset is latched for the next
-    /// [`process_iter`].
+    /// [`Self::process_iter`].
     pub fn insert_audio_chunk(&mut self, pcm: &[f32]) -> Result<(), Error> {
         let chunk_len = pcm.len();
 
@@ -299,10 +299,18 @@ impl OnlineAsrProcessor {
         Ok(committed)
     }
 
-    /// Drain the still-tentative buffer at end of stream.
+    /// Consume the still-tentative buffer at end of stream.
+    ///
+    /// Calling this marks the current audio buffer as finished and clears
+    /// the in-flight hypothesis. A second call returns no words unless more
+    /// audio has been inserted.
     pub fn finish(&mut self) -> Vec<Word> {
-        let remaining = self.transcript_buffer.complete();
+        let remaining = self.transcript_buffer.drain_complete();
         self.buffer_time_offset += self.audio_buffer.len() as f64 / SAMPLING_RATE as f64;
+        self.audio_buffer.clear();
+        self.committed.extend(remaining.iter().cloned());
+        self.transcript_buffer
+            .reset_to_time(self.buffer_time_offset);
         remaining
     }
 
@@ -329,8 +337,7 @@ impl OnlineAsrProcessor {
             self.state = new_state;
         }
         self.audio_buffer.clear();
-        self.transcript_buffer = HypothesisBuffer::new();
-        self.transcript_buffer.last_committed_time = self.total_audio_sec;
+        self.transcript_buffer.reset_to_time(self.total_audio_sec);
         self.buffer_time_offset = self.total_audio_sec;
         self.committed.clear();
         self.speaking = false;
@@ -367,8 +374,8 @@ impl OnlineAsrProcessor {
     /// Read one Word per Whisper segment, relying on `max_len(1)` +
     /// `split_on_word(true)` having forced each segment to be exactly
     /// one word with proper t0/t1. Timestamps come back relative to
-    /// the current audio buffer; the offset is added later inside
-    /// [`HypothesisBuffer::insert`].
+    /// the current audio buffer; the offset is added later by the
+    /// hypothesis buffer.
     fn extract_words(&self) -> Vec<Word> {
         let n_segments = self.state.full_n_segments();
         let mut words: Vec<Word> = Vec::new();
@@ -432,9 +439,7 @@ impl OnlineAsrProcessor {
         self.buffer_time_offset = cut_time;
         // Keep the start-time filter from rejecting future words that
         // legitimately start near the new buffer origin.
-        if self.transcript_buffer.last_committed_time < cut_time {
-            self.transcript_buffer.last_committed_time = cut_time;
-        }
+        self.transcript_buffer.advance_last_committed_time(cut_time);
     }
 
     fn commit_based_cut(&self) -> Option<f64> {

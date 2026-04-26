@@ -17,26 +17,26 @@ pub struct Word {
 /// Rolling buffer that turns a sequence of overlapping Whisper hypotheses
 /// into a monotonic stream of committed words.
 #[derive(Default)]
-pub struct HypothesisBuffer {
+pub(crate) struct HypothesisBuffer {
     /// All words committed so far that are still inside the current audio
     /// window (i.e. not yet `pop_committed`-ed away).
-    pub committed_in_buffer: Vec<Word>,
+    committed_in_buffer: Vec<Word>,
     /// Tentative hypothesis from the previous `insert` call. Compared head-
     /// to-head against `new` in `flush` to find the agreed prefix.
-    pub buffer: Vec<Word>,
+    buffer: Vec<Word>,
     /// Hypothesis just staged by the latest `insert` call, after offset
     /// shifting and de-duplication.
-    pub new: Vec<Word>,
+    new: Vec<Word>,
     /// End time of the last committed word; new words at or before this time
     /// (with a 0.1 s tolerance) are dropped on insert.
-    pub last_committed_time: f64,
+    last_committed_time: f64,
     /// Text of the last committed word (informational, kept to match the
     /// reference implementation).
-    pub last_committed_word: Option<String>,
+    last_committed_word: Option<String>,
 }
 
 impl HypothesisBuffer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -52,7 +52,7 @@ impl HypothesisBuffer {
     ///    head from `new`. This suppresses duplicates that appear when the
     ///    init prompt drags previously committed words back into the model
     ///    output.
-    pub fn insert(&mut self, new: Vec<Word>, offset: f64) {
+    pub(crate) fn insert(&mut self, new: Vec<Word>, offset: f64) {
         let shifted: Vec<Word> = new
             .into_iter()
             .map(|w| Word {
@@ -102,7 +102,7 @@ impl HypothesisBuffer {
     /// hypothesis kept in `buffer`. This is LocalAgreement-2: a word is
     /// emitted only after it has appeared in the same position in two
     /// consecutive hypotheses.
-    pub fn flush(&mut self) -> Vec<Word> {
+    pub(crate) fn flush(&mut self) -> Vec<Word> {
         let mut commit: Vec<Word> = Vec::new();
         while !self.new.is_empty() && !self.buffer.is_empty() {
             if self.new[0].text == self.buffer[0].text {
@@ -125,7 +125,7 @@ impl HypothesisBuffer {
     /// Drop committed words that ended at or before `time`. Used after the
     /// audio buffer is trimmed, to keep `committed_in_buffer` aligned with
     /// the still-resident audio window.
-    pub fn pop_committed(&mut self, time: f64) {
+    pub(crate) fn pop_committed(&mut self, time: f64) {
         while let Some(first) = self.committed_in_buffer.first() {
             if first.end <= time {
                 self.committed_in_buffer.remove(0);
@@ -138,8 +138,29 @@ impl HypothesisBuffer {
     /// Snapshot of the still-tentative buffer (the hypothesis kept around
     /// for the next agreement check). Useful for rendering an "in-flight"
     /// preview to the user.
-    pub fn complete(&self) -> Vec<Word> {
+    pub(crate) fn complete(&self) -> Vec<Word> {
         self.buffer.clone()
+    }
+
+    /// Consume the still-tentative buffer. Used when the stream is known to
+    /// be ending, where waiting for another agreement pass is impossible.
+    pub(crate) fn drain_complete(&mut self) -> Vec<Word> {
+        std::mem::take(&mut self.buffer)
+    }
+
+    /// Clear all hypotheses and anchor future insert filtering at `time`.
+    pub(crate) fn reset_to_time(&mut self, time: f64) {
+        *self = Self {
+            last_committed_time: time,
+            ..Self::default()
+        };
+    }
+
+    /// Move the committed-time guard forward after audio trimming.
+    pub(crate) fn advance_last_committed_time(&mut self, time: f64) {
+        if self.last_committed_time < time {
+            self.last_committed_time = time;
+        }
     }
 }
 
