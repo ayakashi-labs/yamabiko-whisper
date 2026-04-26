@@ -1,4 +1,4 @@
-# local-agreement-whisper
+# yamabiko-whisper
 
 [日本語](README.ja.md)
 
@@ -18,13 +18,13 @@ chunks, and receive only the words that are stable enough to commit.
 
 ```toml
 [dependencies]
-local-agreement-whisper = "0.1"
+yamabiko-whisper = "0.1"
 ```
 
 ```rust,no_run
-use local_agreement_whisper::{OnlineAsrModel, SAMPLE_RATE};
+use yamabiko_whisper::{OnlineAsrModel, SAMPLE_RATE};
 
-fn main() -> Result<(), local_agreement_whisper::Error> {
+fn main() -> Result<(), yamabiko_whisper::Error> {
     let model = OnlineAsrModel::load("ggml-base.en.bin")?;
     let mut asr = model.create_processor("en")?;
 
@@ -70,9 +70,9 @@ Silero VAD is optional. It skips silent chunks and resets the Whisper
 decoder state after a configurable silence window.
 
 ```rust,no_run
-use local_agreement_whisper::{OnlineAsrModel, VadConfig, VadModel};
+use yamabiko_whisper::{OnlineAsrModel, VadConfig, VadModel};
 
-fn main() -> Result<(), local_agreement_whisper::Error> {
+fn main() -> Result<(), yamabiko_whisper::Error> {
     let model = OnlineAsrModel::load("ggml-base.en.bin")?;
     let vad_model = VadModel::load_with_config(
         "ggml-silero-v5.1.2.bin",
@@ -101,9 +101,9 @@ more than one stream, prefer loading `OnlineAsrModel` once and creating
 processors from it.
 
 ```rust,no_run
-use local_agreement_whisper::{DecodingStrategy, OnlineAsrConfig, OnlineAsrModel};
+use yamabiko_whisper::{DecodingStrategy, OnlineAsrConfig, OnlineAsrModel};
 
-fn main() -> Result<(), local_agreement_whisper::Error> {
+fn main() -> Result<(), yamabiko_whisper::Error> {
     let model = OnlineAsrModel::load("ggml-base.en.bin")?;
     let config = OnlineAsrConfig::new("en")
         .with_n_threads(4)
@@ -145,7 +145,7 @@ Enable Vulkan acceleration with:
 
 ```toml
 [dependencies]
-local-agreement-whisper = { version = "0.1", features = ["vulkan"] }
+yamabiko-whisper = { version = "0.1", features = ["vulkan"] }
 ```
 
 Building with `vulkan` requires the native dependencies needed by

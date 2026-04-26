@@ -25,7 +25,7 @@
 //!
 //! Note: this example never imports `whisper_rs` — everything that
 //! used to require it (model loading, VAD context, log hooks) is now
-//! exposed through `local_agreement_whisper`.
+//! exposed through `yamabiko_whisper`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -37,9 +37,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
 
-use local_agreement_whisper::{
-    OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel, Word, install_log_hooks,
-};
+use yamabiko_whisper::{OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel, Word, install_log_hooks};
 
 /// Run a Whisper pass once we have at least this many seconds of new audio.
 const MIN_CHUNK_SEC: f64 = 1.0;

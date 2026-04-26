@@ -384,16 +384,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "local-agreement-whisper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cpal",
- "ctrlc",
- "whisper-rs",
-]
-
-[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1111,4 +1101,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "yamabiko-whisper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cpal",
+ "ctrlc",
+ "whisper-rs",
 ]

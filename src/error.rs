@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-/// All failures surfaced by `local_agreement_whisper`.
+/// All failures surfaced by `yamabiko_whisper`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {

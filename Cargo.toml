@@ -1,12 +1,12 @@
 [package]
-name = "local-agreement-whisper"
+name = "yamabiko-whisper"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Low-latency streaming speech recognition with whisper.cpp and LocalAgreement-2."
 license = "MIT"
-repository = "https://github.com/ItokawaHub/local-agreement-whisper"
-documentation = "https://docs.rs/local-agreement-whisper"
+repository = "https://github.com/ItokawaHub/yamabiko-whisper"
+documentation = "https://docs.rs/yamabiko-whisper"
 readme = "README.md"
 keywords = ["whisper", "asr", "speech", "streaming", "local-agreement"]
 categories = ["multimedia::audio", "api-bindings"]
