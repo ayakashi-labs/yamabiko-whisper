@@ -37,12 +37,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
 
-use local_agreement_whisper::{OnlineAsrProcessor, VadConfig, Word, install_log_hooks};
+use local_agreement_whisper::{
+    OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel, Word, install_log_hooks,
+};
 
 /// Run a Whisper pass once we have at least this many seconds of new audio.
 const MIN_CHUNK_SEC: f64 = 1.0;
 /// Target sampling rate for whisper.cpp (fixed by the model).
-const TARGET_SR: u32 = 16_000;
+const TARGET_SR: u32 = SAMPLE_RATE as u32;
 
 fn main() -> Result<()> {
     // Route whisper.cpp / GGML / VAD logs through a `log` / `tracing`
@@ -59,19 +61,16 @@ fn main() -> Result<()> {
     let vad_model_path = args.next();
 
     eprintln!("loading model: {model_path}");
+    let model = OnlineAsrModel::load(&model_path)?;
     let mut processor = match vad_model_path.as_deref() {
         Some(vad_path) => {
             eprintln!("loading VAD model: {vad_path}");
-            OnlineAsrProcessor::from_model_path_with_vad(
-                &model_path,
-                &language,
-                vad_path,
-                VadConfig::default(),
-            )?
+            let vad_model = VadModel::load_with_config(vad_path, VadConfig::default())?;
+            model.create_processor_with_vad(&language, &vad_model)?
         }
         None => {
             eprintln!("no VAD model supplied; passing every chunk through Whisper");
-            OnlineAsrProcessor::from_model_path(&model_path, &language)?
+            model.create_processor(&language)?
         }
     };
 
@@ -177,10 +176,10 @@ fn main() -> Result<()> {
 
         if pending.len() >= min_samples {
             processor.insert_audio_chunk(&pending)?;
-            let committed = processor.process_iter()?;
+            let output = processor.process()?;
             render(
-                &committed,
-                processor.tentative(),
+                &output.committed,
+                output.tentative,
                 processor.sep(),
                 &mut tentative_visible,
             );
@@ -192,10 +191,10 @@ fn main() -> Result<()> {
     drop(stream);
     if !pending.is_empty() {
         processor.insert_audio_chunk(&pending)?;
-        let committed = processor.process_iter()?;
+        let output = processor.process()?;
         render(
-            &committed,
-            processor.tentative(),
+            &output.committed,
+            output.tentative,
             processor.sep(),
             &mut tentative_visible,
         );
