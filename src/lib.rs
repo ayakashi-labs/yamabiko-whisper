@@ -3,10 +3,11 @@
 //!
 //! `whisper-rs` is fully encapsulated: callers do not need to add it
 //! to their own `Cargo.toml` or import any of its types. Build a
-//! processor with [`OnlineAsrProcessor::from_model_path`], feed it
+//! processor with [`OnlineAsrModel::create_processor`] or
+//! [`OnlineAsrProcessor::from_model_path`], feed it
 //! 16 kHz mono f32 PCM via [`OnlineAsrProcessor::insert_audio_chunk`],
 //! and pull committed words out with
-//! [`OnlineAsrProcessor::process_iter`].
+//! [`OnlineAsrProcessor::process`].
 
 mod error;
 mod hypothesis_buffer;
@@ -14,7 +15,10 @@ mod online_asr;
 
 pub use error::Error;
 pub use hypothesis_buffer::Word;
-pub use online_asr::{OnlineAsrProcessor, VadConfig};
+pub use online_asr::{
+    DecodingStrategy, OnlineAsrConfig, OnlineAsrModel, OnlineAsrProcessor, ProcessOutput,
+    SAMPLE_RATE, VadConfig, VadModel,
+};
 
 /// Forward whisper.cpp / GGML / VAD logs to a `log` / `tracing`
 /// backend. Without calling this they are silently dropped, which is
