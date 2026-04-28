@@ -1,31 +1,12 @@
 //! Real-time microphone transcription with LocalAgreement-2 streaming.
 //!
-//! Pipeline:
-//!     cpal default input device
-//!         -> per-callback mono mix + sample-format conversion to f32
-//!         -> std::sync::mpsc to the main thread
-//!         -> on-line linear-interpolation resampler to 16 kHz
-//!         -> OnlineAsrProcessor (~1.0 s of new audio per pass)
-//!         -> committed words printed as `[<start> - <end>]: <text>`
-//!            in centiseconds (stdout)
-//!         -> tentative hypothesis rendered with `\r` overlay (stderr)
+//! This example intentionally owns the microphone input layer. The crate handles
+//! model loading, VAD, audio normalization helpers, resampling, ASR chunking,
+//! and LocalAgreement processing through `AsrPipeline`.
 //!
 //! Usage:
 //!     cargo run --release --example streaming_mic -- \
 //!         <model.bin> [language=auto] [vad-model.bin]
-//!
-//! The optional VAD model path enables Silero VAD inside the
-//! processor: silent chunks are dropped and the Whisper state is
-//! reset after a short trailing silence so the next utterance starts
-//! with a fresh decoder timeline. Without it every chunk is forwarded
-//! to Whisper directly.
-//!
-//! Press Ctrl-C to stop. The processor's tentative buffer is then
-//! flushed once and printed as a final committed line.
-//!
-//! Note: this example never imports `whisper_rs` — everything that
-//! used to require it (model loading, VAD context, log hooks) is now
-//! exposed through `yamabiko_whisper`.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -34,10 +15,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, Sample, SampleFormat};
 
-use yamabiko_whisper::{OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel, Word, install_log_hooks};
+use yamabiko_whisper::{
+    AsrPipeline, AudioInputConfig, AudioSample, OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel,
+    Word, downmix_interleaved, install_log_hooks,
+};
 
 /// Run a Whisper pass once we have at least this many seconds of new audio.
 const MIN_CHUNK_SEC: f64 = 1.0;
@@ -45,10 +29,6 @@ const MIN_CHUNK_SEC: f64 = 1.0;
 const TARGET_SR: u32 = SAMPLE_RATE as u32;
 
 fn main() -> Result<()> {
-    // Route whisper.cpp / GGML / VAD logs through a `log` / `tracing`
-    // backend. With no backend wired up they get dropped, which is
-    // what we want here — those logs would otherwise spam stderr
-    // several times per second.
     install_log_hooks();
 
     let mut args = std::env::args().skip(1);
@@ -60,7 +40,7 @@ fn main() -> Result<()> {
 
     eprintln!("loading model: {model_path}");
     let model = OnlineAsrModel::load(&model_path)?;
-    let mut processor = match vad_model_path.as_deref() {
+    let processor = match vad_model_path.as_deref() {
         Some(vad_path) => {
             eprintln!("loading VAD model: {vad_path}");
             let vad_model = VadModel::load_with_config(vad_path, VadConfig::default())?;
@@ -72,7 +52,6 @@ fn main() -> Result<()> {
         }
     };
 
-    // Pick the default microphone and its native config.
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -91,59 +70,40 @@ fn main() -> Result<()> {
     );
 
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let err_fn = |err| eprintln!("stream error: {err}");
-
-    // Build a typed input stream per cpal sample format. Each callback
-    // converts to f32, downmixes to mono, and forwards a Vec<f32> chunk.
     let stream = match sample_format {
         SampleFormat::F32 => {
-            let tx = tx.clone();
-            device.build_input_stream::<f32, _, _>(
-                &stream_config,
-                move |data, _| {
-                    let _ = tx.send(downmix(data, channels));
-                },
-                err_fn,
-                None,
-            )?
+            build_input_stream::<f32>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::F64 => {
+            build_input_stream::<f64>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::I8 => {
+            build_input_stream::<i8>(&device, &stream_config, channels, tx.clone())?
         }
         SampleFormat::I16 => {
-            let tx = tx.clone();
-            device.build_input_stream::<i16, _, _>(
-                &stream_config,
-                move |data, _| {
-                    let _ = tx.send(downmix(data, channels));
-                },
-                err_fn,
-                None,
-            )?
+            build_input_stream::<i16>(&device, &stream_config, channels, tx.clone())?
         }
         SampleFormat::I32 => {
-            let tx = tx.clone();
-            device.build_input_stream::<i32, _, _>(
-                &stream_config,
-                move |data, _| {
-                    let _ = tx.send(downmix(data, channels));
-                },
-                err_fn,
-                None,
-            )?
+            build_input_stream::<i32>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::I64 => {
+            build_input_stream::<i64>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::U8 => {
+            build_input_stream::<u8>(&device, &stream_config, channels, tx.clone())?
         }
         SampleFormat::U16 => {
-            let tx = tx.clone();
-            device.build_input_stream::<u16, _, _>(
-                &stream_config,
-                move |data, _| {
-                    let _ = tx.send(downmix(data, channels));
-                },
-                err_fn,
-                None,
-            )?
+            build_input_stream::<u16>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::U32 => {
+            build_input_stream::<u32>(&device, &stream_config, channels, tx.clone())?
+        }
+        SampleFormat::U64 => {
+            build_input_stream::<u64>(&device, &stream_config, channels, tx.clone())?
         }
         other => bail!("unsupported sample format: {:?}", other),
     };
     drop(tx);
-
     stream.play().context("failed to start input stream")?;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -153,84 +113,72 @@ fn main() -> Result<()> {
             .context("failed to install Ctrl-C handler")?;
     }
 
-    eprintln!("speak now (Ctrl-C to stop)…");
-
-    let mut resampler = LinearResampler::new(input_sr, TARGET_SR);
-    let mut pending: Vec<f32> = Vec::new();
-    let min_samples = (MIN_CHUNK_SEC * TARGET_SR as f64) as usize;
+    let mut pipeline = AsrPipeline::new(
+        processor,
+        AudioInputConfig::new(input_sr, 1).with_process_interval_sec(MIN_CHUNK_SEC),
+    )?;
     let mut tentative_visible = false;
 
+    eprintln!("speak now (Ctrl-C to stop)...");
     while running.load(Ordering::SeqCst) {
-        // Drain everything currently queued, with a short wait so the
-        // loop does not spin when the mic is silent.
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(chunk) => pending.extend(resampler.process(&chunk)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+            push_audio_chunk(&mut pipeline, &chunk, &mut tentative_visible)?;
         }
         while let Ok(chunk) = rx.try_recv() {
-            pending.extend(resampler.process(&chunk));
-        }
-
-        if pending.len() >= min_samples {
-            processor.insert_audio_chunk(&pending)?;
-            let output = processor.process()?;
-            render(
-                &output.committed,
-                output.tentative,
-                processor.sep(),
-                &mut tentative_visible,
-            );
-            pending.clear();
+            push_audio_chunk(&mut pipeline, &chunk, &mut tentative_visible)?;
         }
     }
 
-    // Stop capture and flush whatever remains.
     drop(stream);
-    if !pending.is_empty() {
-        processor.insert_audio_chunk(&pending)?;
-        let output = processor.process()?;
-        render(
-            &output.committed,
-            output.tentative,
-            processor.sep(),
-            &mut tentative_visible,
-        );
-    }
-    let final_words = processor.finish();
-    if tentative_visible {
-        // Wipe the in-flight overlay before the final committed line.
-        eprint!("\r\x1b[K");
-    }
-    if let (Some(first), Some(last)) = (final_words.first(), final_words.last()) {
-        let joined = join_words(&final_words, processor.sep());
-        println!("[{} - {}]: {}", to_cs(first.start), to_cs(last.end), joined);
-    }
+    let output = pipeline.finish()?;
+    render(
+        &output.committed,
+        output.tentative,
+        pipeline.sep(),
+        &mut tentative_visible,
+    );
 
     Ok(())
 }
 
-/// Convert a seconds-valued timestamp to centiseconds (10 ms units).
-fn to_cs(sec: f64) -> i64 {
-    (sec * 100.0).round() as i64
+fn build_input_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    tx: mpsc::Sender<Vec<f32>>,
+) -> Result<cpal::Stream>
+where
+    T: cpal::SizedSample + AudioSample + Send + 'static,
+{
+    let err_fn = |err| eprintln!("stream error: {err}");
+    Ok(device.build_input_stream::<T, _, _>(
+        config,
+        move |data, _| {
+            let _ = tx.send(downmix_interleaved(data, channels));
+        },
+        err_fn,
+        None,
+    )?)
 }
 
-/// Convert any cpal sample type to f32 and average all channels into
-/// one mono frame. Channel count of 0 should not happen in practice.
-fn downmix<T>(data: &[T], channels: usize) -> Vec<f32>
-where
-    T: cpal::SizedSample,
-    f32: FromSample<T>,
-{
-    if channels <= 1 {
-        return data.iter().map(|&s| f32::from_sample(s)).collect();
+fn push_audio_chunk(
+    pipeline: &mut AsrPipeline,
+    chunk: &[f32],
+    tentative_visible: &mut bool,
+) -> Result<()> {
+    if let Some(output) = pipeline.push_mono(chunk)? {
+        render(
+            &output.committed,
+            output.tentative,
+            pipeline.sep(),
+            tentative_visible,
+        );
     }
-    data.chunks_exact(channels)
-        .map(|frame| {
-            let sum: f32 = frame.iter().map(|&s| f32::from_sample(s)).sum();
-            sum / channels as f32
-        })
-        .collect()
+    Ok(())
+}
+
+fn to_cs(sec: f64) -> i64 {
+    (sec * 100.0).round() as i64
 }
 
 fn join_words(words: &[Word], sep: &str) -> String {
@@ -238,16 +186,8 @@ fn join_words(words: &[Word], sep: &str) -> String {
     parts.join(sep)
 }
 
-/// Print just-committed words as a new line; redraw the tentative
-/// overlay underneath so the user always sees both: a stable history
-/// above and a moving prediction below. Committed lines use the
-/// `[<start> - <end>]: <text>` centisecond format, taking the start
-/// of the first and end of the last word in the batch.
 fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible: &mut bool) {
     if let (Some(first), Some(last)) = (committed.first(), committed.last()) {
-        // Erase the tentative line first so the new committed line
-        // lands on its own row instead of being prepended to the
-        // overlay text.
         if *tentative_visible {
             eprint!("\r\x1b[K");
             *tentative_visible = false;
@@ -257,69 +197,14 @@ fn render(committed: &[Word], tentative: Vec<Word>, sep: &str, tentative_visible
         let _ = std::io::stdout().flush();
     }
 
-    // Re-draw tentative hypothesis on stderr so it stays visually
-    // distinct from the committed stdout history.
     if !tentative.is_empty() {
         let joined = join_words(&tentative, sep);
-        eprint!("\r  …(tentative): {joined}\x1b[K");
+        eprint!("\r  ...(tentative): {joined}\x1b[K");
         let _ = std::io::stderr().flush();
         *tentative_visible = true;
     } else if *tentative_visible {
         eprint!("\r\x1b[K");
         let _ = std::io::stderr().flush();
         *tentative_visible = false;
-    }
-}
-
-/// Tiny streaming linear-interpolation resampler. Quality is more than
-/// adequate for ASR: speech energy lives below 4 kHz and Whisper
-/// expects a 16 kHz log-mel spectrogram, so anti-aliasing is taken
-/// care of by the model's own front-end. Keeps one sample of state
-/// across calls so the interpolation is continuous at chunk
-/// boundaries.
-struct LinearResampler {
-    ratio: f64,
-    pos: f64,
-    last: f32,
-}
-
-impl LinearResampler {
-    fn new(input_sr: u32, output_sr: u32) -> Self {
-        Self {
-            ratio: input_sr as f64 / output_sr as f64,
-            pos: 0.0,
-            last: 0.0,
-        }
-    }
-
-    fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        if input.is_empty() {
-            return Vec::new();
-        }
-        // If sample rates already match, fast-path the chunk verbatim.
-        if (self.ratio - 1.0).abs() < 1e-9 {
-            self.last = *input.last().unwrap();
-            return input.to_vec();
-        }
-
-        let mut out = Vec::with_capacity(((input.len() as f64) / self.ratio) as usize + 1);
-        let len = input.len() as f64;
-        while self.pos < len {
-            let i = self.pos.floor() as isize;
-            let frac = (self.pos - self.pos.floor()) as f32;
-            let next_idx = (i + 1) as usize;
-            if next_idx >= input.len() {
-                // Need a sample from the *next* chunk to interpolate; defer.
-                break;
-            }
-            let a = if i < 0 { self.last } else { input[i as usize] };
-            let b = input[next_idx];
-            out.push(a * (1.0 - frac) + b * frac);
-            self.pos += self.ratio;
-        }
-        // Re-base position so it stays in [-1, ratio) for the next call.
-        self.pos -= input.len() as f64;
-        self.last = *input.last().unwrap();
-        out
     }
 }

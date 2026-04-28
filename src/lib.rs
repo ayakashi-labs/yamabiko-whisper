@@ -6,13 +6,15 @@
 //! processor with [`OnlineAsrModel::create_processor`] or
 //! [`OnlineAsrProcessor::from_model_path`], feed it
 //! 16 kHz mono f32 PCM via [`OnlineAsrProcessor::insert_audio_chunk`],
-//! and pull committed words out with
-//! [`OnlineAsrProcessor::process`].
+//! or let [`AsrPipeline`] handle downmixing, resampling, and chunking
+//! for a microphone/file/network source.
 
+mod audio;
 mod error;
 mod hypothesis_buffer;
 mod online_asr;
 
+pub use audio::{AsrPipeline, AudioInputConfig, AudioSample, LinearResampler, downmix_interleaved};
 pub use error::Error;
 pub use hypothesis_buffer::Word;
 pub use online_asr::{

@@ -12,6 +12,8 @@ use std::fmt;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// The supplied audio format or processing interval is invalid.
+    InvalidAudio(String),
     /// Loading the Whisper model file failed (path missing, bad format,
     /// GGML init failure, etc.).
     ModelLoad(String),
@@ -28,6 +30,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::InvalidAudio(msg) => write!(f, "invalid audio input: {msg}"),
             Error::ModelLoad(msg) => write!(f, "failed to load whisper model: {msg}"),
             Error::VadModelLoad(msg) => write!(f, "failed to load VAD model: {msg}"),
             Error::StateInit(msg) => write!(f, "failed to create whisper state: {msg}"),
