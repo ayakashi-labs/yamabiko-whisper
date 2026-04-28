@@ -52,58 +52,8 @@ fn main() -> Result<()> {
         }
     };
 
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("no default input device"))?;
-    let supported_config = device
-        .default_input_config()
-        .context("failed to query default input config")?;
-    let input_sr = supported_config.sample_rate();
-    let channels = supported_config.channels() as usize;
-    let sample_format = supported_config.sample_format();
-    let stream_config: cpal::StreamConfig = supported_config.into();
-
-    eprintln!(
-        "input: {} Hz, {} ch, {:?} -> resampling to {} Hz mono",
-        input_sr, channels, sample_format, TARGET_SR
-    );
-
     let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let stream = match sample_format {
-        SampleFormat::F32 => {
-            build_input_stream::<f32>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::F64 => {
-            build_input_stream::<f64>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::I8 => {
-            build_input_stream::<i8>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::I16 => {
-            build_input_stream::<i16>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::I32 => {
-            build_input_stream::<i32>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::I64 => {
-            build_input_stream::<i64>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::U8 => {
-            build_input_stream::<u8>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::U16 => {
-            build_input_stream::<u16>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::U32 => {
-            build_input_stream::<u32>(&device, &stream_config, channels, tx.clone())?
-        }
-        SampleFormat::U64 => {
-            build_input_stream::<u64>(&device, &stream_config, channels, tx.clone())?
-        }
-        other => bail!("unsupported sample format: {:?}", other),
-    };
-    drop(tx);
+    let (stream, input_sr) = open_input_stream(tx)?;
     stream.play().context("failed to start input stream")?;
 
     let running = Arc::new(AtomicBool::new(true));
@@ -139,6 +89,48 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Open the default input device and build a stream that forwards mono f32 chunks.
+fn open_input_stream(tx: mpsc::Sender<Vec<f32>>) -> Result<(cpal::Stream, u32)> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow!("no default input device"))?;
+    let supported_config = device
+        .default_input_config()
+        .context("failed to query default input config")?;
+    let input_sr = supported_config.sample_rate();
+    let channels = supported_config.channels() as usize;
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
+
+    eprintln!(
+        "input: {} Hz, {} ch, {:?} -> resampling to {} Hz mono",
+        input_sr, channels, sample_format, TARGET_SR
+    );
+
+    // Dispatch on the device's sample format; cpal needs the concrete type at compile time.
+    macro_rules! build {
+        ($ty:ty) => {
+            build_input_stream::<$ty>(&device, &stream_config, channels, tx)?
+        };
+    }
+    let stream = match sample_format {
+        SampleFormat::F32 => build!(f32),
+        SampleFormat::F64 => build!(f64),
+        SampleFormat::I8 => build!(i8),
+        SampleFormat::I16 => build!(i16),
+        SampleFormat::I32 => build!(i32),
+        SampleFormat::I64 => build!(i64),
+        SampleFormat::U8 => build!(u8),
+        SampleFormat::U16 => build!(u16),
+        SampleFormat::U32 => build!(u32),
+        SampleFormat::U64 => build!(u64),
+        other => bail!("unsupported sample format: {:?}", other),
+    };
+
+    Ok((stream, input_sr))
 }
 
 fn build_input_stream<T>(
