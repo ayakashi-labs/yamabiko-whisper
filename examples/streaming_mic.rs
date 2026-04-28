@@ -4,6 +4,14 @@
 //! model loading, VAD, audio normalization helpers, resampling, ASR chunking,
 //! and LocalAgreement processing through `AsrPipeline`.
 //!
+//! Threading layout:
+//!   cpal audio thread  --(audio_tx: mpsc<Vec<f32>>)-->  ASR thread
+//!   ASR thread         --(event_tx: mpsc<AsrEvent>)-->  main thread (render)
+//!
+//! Splitting Whisper/VAD inference off the main thread keeps the rendering
+//! loop responsive and prevents the audio mpsc from backing up while a long
+//! Whisper pass is in flight.
+//!
 //! Usage:
 //!     cargo run --release --example streaming_mic -- \
 //!         <model.bin> [language=auto] [vad-model.bin]
@@ -11,7 +19,8 @@
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,14 +28,20 @@ use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use yamabiko_whisper::{
-    AsrPipeline, AudioInputConfig, AudioSample, OnlineAsrModel, SAMPLE_RATE, VadConfig, VadModel,
-    Word, downmix_interleaved, install_log_hooks,
+    AsrPipeline, AudioInputConfig, AudioSample, OnlineAsrModel, ProcessOutput, SAMPLE_RATE,
+    VadConfig, VadModel, Word, downmix_interleaved, install_log_hooks,
 };
 
 /// Run a Whisper pass once we have at least this many seconds of new audio.
 const MIN_CHUNK_SEC: f64 = 1.0;
 /// Target sampling rate for whisper.cpp (fixed by the model).
 const TARGET_SR: u32 = SAMPLE_RATE as u32;
+
+/// Output of the ASR worker thread, consumed by the main render loop.
+enum AsrEvent {
+    Process(ProcessOutput),
+    Finish(ProcessOutput),
+}
 
 fn main() -> Result<()> {
     install_log_hooks();
@@ -51,10 +66,17 @@ fn main() -> Result<()> {
             model.create_processor(&language)?
         }
     };
+    let sep = processor.sep();
 
-    let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let (stream, input_sr) = open_input_stream(tx)?;
+    let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>();
+    let (stream, input_sr) = open_input_stream(audio_tx)?;
     stream.play().context("failed to start input stream")?;
+
+    let pipeline_config =
+        AudioInputConfig::new(input_sr, 1).with_process_interval_sec(MIN_CHUNK_SEC);
+
+    let (event_tx, event_rx) = mpsc::channel::<AsrEvent>();
+    let asr_handle = spawn_asr_worker(processor, pipeline_config, audio_rx, event_tx);
 
     let running = Arc::new(AtomicBool::new(true));
     {
@@ -63,32 +85,62 @@ fn main() -> Result<()> {
             .context("failed to install Ctrl-C handler")?;
     }
 
-    let mut pipeline = AsrPipeline::new(
-        processor,
-        AudioInputConfig::new(input_sr, 1).with_process_interval_sec(MIN_CHUNK_SEC),
-    )?;
     let mut tentative_visible = false;
-
     eprintln!("speak now (Ctrl-C to stop)...");
-    while running.load(Ordering::SeqCst) {
-        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
-            push_audio_chunk(&mut pipeline, &chunk, &mut tentative_visible)?;
-        }
-        while let Ok(chunk) = rx.try_recv() {
-            push_audio_chunk(&mut pipeline, &chunk, &mut tentative_visible)?;
+    'main_loop: while running.load(Ordering::SeqCst) {
+        match event_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(AsrEvent::Process(out)) => {
+                render(&out.committed, out.tentative, sep, &mut tentative_visible);
+            }
+            Ok(AsrEvent::Finish(out)) => {
+                render(&out.committed, out.tentative, sep, &mut tentative_visible);
+                break 'main_loop;
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break 'main_loop,
         }
     }
 
+    // Stopping the cpal stream drops the audio_tx clone held by the callback,
+    // which disconnects audio_rx and lets the ASR thread emit its final
+    // `Finish` event before exiting.
     drop(stream);
-    let output = pipeline.finish()?;
-    render(
-        &output.committed,
-        output.tentative,
-        pipeline.sep(),
-        &mut tentative_visible,
-    );
+    while let Ok(event) = event_rx.recv() {
+        match event {
+            AsrEvent::Process(out) | AsrEvent::Finish(out) => {
+                render(&out.committed, out.tentative, sep, &mut tentative_visible);
+            }
+        }
+    }
 
+    asr_handle
+        .join()
+        .map_err(|_| anyhow!("ASR worker thread panicked"))??;
     Ok(())
+}
+
+fn spawn_asr_worker(
+    processor: yamabiko_whisper::OnlineAsrProcessor,
+    pipeline_config: AudioInputConfig,
+    audio_rx: mpsc::Receiver<Vec<f32>>,
+    event_tx: mpsc::Sender<AsrEvent>,
+) -> thread::JoinHandle<Result<()>> {
+    thread::Builder::new()
+        .name("asr-worker".to_string())
+        .spawn(move || -> Result<()> {
+            let mut pipeline = AsrPipeline::new(processor, pipeline_config)?;
+            while let Ok(chunk) = audio_rx.recv() {
+                if let Some(output) = pipeline.push_mono(&chunk)? {
+                    if event_tx.send(AsrEvent::Process(output)).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            let final_output = pipeline.finish()?;
+            let _ = event_tx.send(AsrEvent::Finish(final_output));
+            Ok(())
+        })
+        .expect("failed to spawn ASR worker thread")
 }
 
 /// Open the default input device and build a stream that forwards mono f32 chunks.
@@ -151,22 +203,6 @@ where
         err_fn,
         None,
     )?)
-}
-
-fn push_audio_chunk(
-    pipeline: &mut AsrPipeline,
-    chunk: &[f32],
-    tentative_visible: &mut bool,
-) -> Result<()> {
-    if let Some(output) = pipeline.push_mono(chunk)? {
-        render(
-            &output.committed,
-            output.tentative,
-            pipeline.sep(),
-            tentative_visible,
-        );
-    }
-    Ok(())
 }
 
 fn to_cs(sec: f64) -> i64 {
