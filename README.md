@@ -3,172 +3,71 @@
 [日本語](README.ja.md)
 
 Low-latency streaming speech recognition for Rust, built on
-[`whisper-rs`](https://crates.io/crates/whisper-rs) and the
-LocalAgreement-2 policy from whisper streaming research.
+[`whisper-rs`](https://crates.io/crates/whisper-rs), whisper.cpp, Silero VAD,
+and the LocalAgreement-2 policy from streaming Whisper research.
 
-The crate hides `whisper-rs` from your public code. Load a GGML Whisper
-model once, create one or more processors, feed 16 kHz mono `f32` PCM
-chunks, and receive only the words that are stable enough to commit.
+For 0.2, the supported usage path requires VAD. Load a GGML Whisper model and a
+GGML Silero VAD model, create a VAD-backed processor, and feed audio through
+`AsrPipeline`. The pipeline normalizes samples, downmixes channels, resamples to
+16 kHz, chunks audio, and returns committed words plus a tentative live
+hypothesis.
 
-> Note: This crate is currently tested primarily with Japanese speech.
-> Other languages should work through Whisper's language support, but
-> they have not been validated as thoroughly.
+> Status: this crate is currently validated primarily with Japanese speech.
+> Other languages should work through Whisper's language support, but they have
+> not been tested as thoroughly. The crate is still pre-1.0, and breaking API or
+> behavior changes may continue while the streaming pipeline is refined.
 
-## Quick Start
+## Install
 
 ```toml
 [dependencies]
-yamabiko-whisper = "0.1"
+yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
 ```
 
-```rust,no_run
-use yamabiko_whisper::{OnlineAsrModel, SAMPLE_RATE};
+On Windows, the default `whisper-rs` backend can be extremely slow in optimized
+production builds. For production use, prefer an accelerated whisper.cpp backend
+such as Vulkan or CUDA. This crate currently exposes Vulkan through the
+`vulkan` feature.
 
-fn main() -> Result<(), yamabiko_whisper::Error> {
-    let model = OnlineAsrModel::load("ggml-base.en.bin")?;
-    let mut asr = model.create_processor("en")?;
+Model files are not bundled. Provide:
 
-    // 16 kHz mono f32 PCM. Values should normally be in [-1.0, 1.0].
-    let pcm: Vec<f32> = vec![0.0; SAMPLE_RATE];
+- a GGML-format Whisper model compatible with whisper.cpp
+- a GGML-format Silero VAD model
 
-    asr.insert_audio_chunk(&pcm)?;
-    let output = asr.process()?;
-    for word in output.committed {
-        println!("{:.2}-{:.2}: {}", word.start, word.end, word.text);
-    }
+## Start With The Microphone Example
 
-    for word in asr.finish() {
-        println!("{:.2}-{:.2}: {}", word.start, word.end, word.text);
-    }
-
-    Ok(())
-}
-```
-
-Use `"auto"` as the language to let Whisper detect the language, or pass
-a Whisper language code such as `"en"` or `"ja"`.
-
-The first `process` call often returns no committed words. LocalAgreement-2
-commits a word after it appears in the same prefix position in two
-consecutive hypotheses. Use `output.tentative` for a live preview line.
-
-## Input Audio
-
-`OnlineAsrProcessor::insert_audio_chunk` expects:
-
-- 16,000 Hz sample rate
-- mono channel layout
-- `f32` PCM samples
-- normalized audio, usually in the `[-1.0, 1.0]` range
-
-If your input comes from a microphone, file, or network stream at another
-sample rate, resample it before calling `insert_audio_chunk`.
-
-## VAD
-
-Silero VAD is optional. It skips silent chunks and resets the Whisper
-decoder state after a configurable silence window.
-
-```rust,no_run
-use yamabiko_whisper::{OnlineAsrModel, VadConfig, VadModel};
-
-fn main() -> Result<(), yamabiko_whisper::Error> {
-    let model = OnlineAsrModel::load("ggml-base.en.bin")?;
-    let vad_model = VadModel::load_with_config(
-        "ggml-silero-v5.1.2.bin",
-        VadConfig::default(),
-    )?;
-    let mut asr = model.create_processor_with_vad("en", &vad_model)?;
-
-    asr.insert_audio_chunk(&vec![0.0; 16_000])?;
-    let output = asr.process()?;
-    drop(output);
-
-    Ok(())
-}
-```
-
-When VAD closes an utterance, `process` flushes the current tentative
-words and returns `ProcessOutput { finalized_by_vad: true, .. }`, so
-callers can distinguish that boundary from a normal LocalAgreement
-commit.
-
-## Configuration
-
-For one-off use, `OnlineAsrProcessor::from_model_path` and
-`from_model_path_with_vad` remain available. For applications that create
-more than one stream, prefer loading `OnlineAsrModel` once and creating
-processors from it.
-
-```rust,no_run
-use yamabiko_whisper::{DecodingStrategy, OnlineAsrConfig, OnlineAsrModel};
-
-fn main() -> Result<(), yamabiko_whisper::Error> {
-    let model = OnlineAsrModel::load("ggml-base.en.bin")?;
-    let config = OnlineAsrConfig::new("en")
-        .with_n_threads(4)
-        .with_buffer_trimming_sec(10.0)
-        .with_prompt_char_budget(300)
-        .with_decoding_strategy(DecodingStrategy::BeamSearch {
-            beam_size: 3,
-            patience: -1.0,
-        });
-
-    let _asr = model.create_processor_with_config(config)?;
-    Ok(())
-}
-```
-
-## Example: Microphone Streaming
-
-The repository includes a microphone example using `cpal`.
+The recommended reference implementation is
+[`examples/streaming_mic.rs`](https://github.com/ayakashi-labs/yamabiko-whisper/blob/main/examples/streaming_mic.rs).
+It shows the intended 0.2 flow: load both models, create a VAD-backed
+processor, capture the default microphone with `cpal`, feed `AsrPipeline`,
+print committed words, and render a tentative line.
 
 ```bash
-cargo run --release --example streaming_mic -- <model.bin> [language=auto]
+cargo run --release --features vulkan --example streaming_mic -- <model.bin> <language> <vad-model.bin>
 ```
 
-With VAD:
+For language autodetection, pass `auto` explicitly:
 
 ```bash
-cargo run --release --example streaming_mic -- <model.bin> [language=auto] <vad-model.bin>
+cargo run --release --features vulkan --example streaming_mic -- ggml-large-v3-turbo-q5_0.bin auto ggml-silero-v5.1.2.bin
 ```
 
-The example captures the default input device, downmixes to mono,
-resamples to 16 kHz, prints committed words to stdout, and renders the
-tentative hypothesis on stderr.
+If your application already owns the audio input layer, mirror the example's ASR
+side: create `OnlineAsrModel`, create `VadModel`, call
+`create_processor_with_vad`, then wrap the processor in `AsrPipeline`.
 
-## Features
+## Feature Flags
 
 By default, the crate builds the CPU backend exposed by `whisper-rs`.
 
-Enable Vulkan acceleration with:
+On Windows, that default backend may be too slow for production speech
+recognition. Use `vulkan` where possible, or a CUDA-enabled whisper.cpp /
+`whisper-rs` build if your deployment targets NVIDIA GPUs.
 
 ```toml
 [dependencies]
-yamabiko-whisper = { version = "0.1", features = ["vulkan"] }
+yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
 ```
 
-Building with `vulkan` requires the native dependencies needed by
-`whisper-rs` and whisper.cpp, including a working Vulkan SDK and CMake.
-
-## Model Files
-
-Use GGML-format Whisper models compatible with whisper.cpp. The VAD entry
-point expects a GGML Silero VAD model file.
-
-Model files are not bundled with the crate.
-
-## Development
-
-Useful commands:
-
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo rustdoc --lib -- -D warnings
-cargo package --allow-dirty
-```
-
-The repository keeps `.cargo/config.toml` locally to shorten the build
-target path on Windows when Vulkan shader generation is enabled. That
-local configuration is excluded from the published crate.
+Building with `vulkan` requires the native dependencies needed by `whisper-rs`
+and whisper.cpp, including a working Vulkan SDK and CMake.
