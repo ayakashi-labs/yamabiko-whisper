@@ -649,17 +649,13 @@ impl OnlineAsrProcessor {
     /// Trim the audio buffer once it grows past `buffer_trimming_sec`.
     ///
     /// Two cut-point strategies, in order:
-    /// 1. End of the last committed word (preferred — fully aligned with
-    ///    LocalAgreement state).
-    /// 2. End of the second-to-last Whisper segment (fallback — used when
-    ///    LocalAgreement has not been firing, e.g. CJK predictions that
-    ///    flicker across iterations and never produce a stable prefix).
+    /// 1. End of a completed Whisper segment that is still within the
+    ///    committed LocalAgreement prefix.
+    /// 2. End of the last committed word.
     ///
-    /// Strategy (2) only trims audio; it does NOT promote tentative words
-    /// to committed, since those words have not been confirmed by
-    /// LocalAgreement and force-committing them would degrade overall
-    /// transcription accuracy. The trade-off is that some unconfirmed
-    /// hypotheses fall off the back of the buffer when this fires.
+    /// Both strategies are bounded by committed text. Trimming beyond the
+    /// last committed word would discard audio that LocalAgreement has not
+    /// confirmed yet, causing words to disappear from later agreement checks.
     fn maybe_trim(&mut self) {
         let buf_secs = self.audio_buffer.len() as f64 / SAMPLE_RATE as f64;
         if buf_secs <= self.config.buffer_trimming_sec {
@@ -667,8 +663,8 @@ impl OnlineAsrProcessor {
         }
 
         let cut_time = self
-            .commit_based_cut()
-            .or_else(|| self.segment_end_cut())
+            .segment_end_cut()
+            .or_else(|| self.commit_based_cut())
             .filter(|&t| t > self.buffer_time_offset);
         let Some(cut_time) = cut_time else {
             return;
@@ -692,16 +688,36 @@ impl OnlineAsrProcessor {
     }
 
     fn segment_end_cut(&self) -> Option<f64> {
+        let last_committed_end = self.committed.last()?.end;
         let n = self.state.full_n_segments();
         if n < 2 {
             return None;
         }
-        // The second-to-last segment is much more stable than the last,
-        // which is often still mid-utterance.
-        let seg = self.state.get_segment(n - 2)?;
-        let end_sec = seg.end_timestamp() as f64 / 100.0 + self.buffer_time_offset;
-        Some(end_sec)
+        let mut segment_ends = Vec::with_capacity(n as usize);
+        for seg_idx in 0..n {
+            let seg = self.state.get_segment(seg_idx)?;
+            segment_ends.push(seg.end_timestamp() as f64 / 100.0);
+        }
+        segment_cut_within_committed(&segment_ends, self.buffer_time_offset, last_committed_end)
     }
+}
+
+fn segment_cut_within_committed(
+    segment_ends: &[f64],
+    buffer_time_offset: f64,
+    last_committed_end: f64,
+) -> Option<f64> {
+    if segment_ends.len() < 2 {
+        return None;
+    }
+
+    let mut idx = segment_ends.len() - 2;
+    while idx > 0 && segment_ends[idx] + buffer_time_offset > last_committed_end {
+        idx -= 1;
+    }
+
+    let cut_time = segment_ends[idx] + buffer_time_offset;
+    (cut_time > buffer_time_offset && cut_time <= last_committed_end).then_some(cut_time)
 }
 
 fn is_cjk(language: &str) -> bool {
@@ -712,4 +728,30 @@ fn default_n_threads() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_cut_never_exceeds_last_committed_word() {
+        let cut = segment_cut_within_committed(&[4.0, 8.0, 12.0], 0.0, 6.0);
+
+        assert_eq!(cut, Some(4.0));
+    }
+
+    #[test]
+    fn segment_cut_uses_second_to_last_when_committed() {
+        let cut = segment_cut_within_committed(&[4.0, 8.0, 12.0], 0.0, 9.0);
+
+        assert_eq!(cut, Some(8.0));
+    }
+
+    #[test]
+    fn segment_cut_returns_none_without_committed_audio_after_offset() {
+        let cut = segment_cut_within_committed(&[4.0, 8.0, 12.0], 5.0, 8.0);
+
+        assert_eq!(cut, None);
+    }
 }

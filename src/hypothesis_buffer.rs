@@ -14,6 +14,9 @@ pub struct Word {
     pub text: String,
 }
 
+const COMMITTED_TIME_TOLERANCE_SEC: f64 = 0.1;
+const MAX_COMMITTED_OVERLAP_RATIO: f64 = 0.5;
+
 /// Rolling buffer that turns a sequence of overlapping Whisper hypotheses
 /// into a monotonic stream of committed words.
 #[derive(Default)]
@@ -44,8 +47,10 @@ impl HypothesisBuffer {
     /// so that callers can pass per-iteration relative timings.
     ///
     /// Two filtering steps follow the offset shift:
-    /// 1. Drop words that start at or before `last_committed_time - 0.1` —
-    ///    they are already in the past and would re-emit committed audio.
+    /// 1. Drop words that are already covered by `last_committed_time`, with
+    ///    a small tolerance. Slight timestamp overlap is allowed so adjacent
+    ///    utterances are not lost, but hypotheses mostly inside the committed
+    ///    region are rejected to avoid re-emitting corrected duplicates.
     /// 2. If the first new word starts within ±1 s of `last_committed_time`,
     ///    look for the longest n-gram (n = 1..=5) match between the tail of
     ///    `committed_in_buffer` and the head of `new`, and drop the matching
@@ -64,7 +69,7 @@ impl HypothesisBuffer {
 
         let mut filtered: Vec<Word> = shifted
             .into_iter()
-            .filter(|w| w.start > self.last_committed_time - 0.1)
+            .filter(|w| is_after_committed_region(w, self.last_committed_time))
             .collect();
 
         if let Some(first) = filtered.first()
@@ -104,6 +109,7 @@ impl HypothesisBuffer {
     /// consecutive hypotheses.
     pub(crate) fn flush(&mut self) -> Vec<Word> {
         let mut commit: Vec<Word> = Vec::new();
+        let has_new_hypothesis = !self.new.is_empty();
         while !self.new.is_empty() && !self.buffer.is_empty() {
             if self.new[0].text == self.buffer[0].text {
                 let w = self.new.remove(0);
@@ -116,9 +122,13 @@ impl HypothesisBuffer {
                 break;
             }
         }
-        // Whatever survives in `new` becomes the next hypothesis to compare
-        // against. `new` is then cleared so the next `insert` starts fresh.
-        self.buffer = std::mem::take(&mut self.new);
+        // Whatever survives in a non-empty `new` becomes the next hypothesis
+        // to compare against. If the current Whisper pass produced no
+        // post-commit words, keep the previous tentative buffer instead of
+        // erasing it; VAD/end-of-stream finalization may still need it.
+        if has_new_hypothesis {
+            self.buffer = std::mem::take(&mut self.new);
+        }
         commit
     }
 
@@ -162,6 +172,20 @@ impl HypothesisBuffer {
             self.last_committed_time = time;
         }
     }
+}
+
+fn is_after_committed_region(word: &Word, last_committed_time: f64) -> bool {
+    let committed_edge = last_committed_time - COMMITTED_TIME_TOLERANCE_SEC;
+    if word.end <= committed_edge {
+        return false;
+    }
+    if word.start >= committed_edge {
+        return true;
+    }
+
+    let duration = (word.end - word.start).max(0.02);
+    let committed_overlap = (committed_edge - word.start).max(0.0);
+    committed_overlap / duration <= MAX_COMMITTED_OVERLAP_RATIO
 }
 
 #[cfg(test)]
@@ -214,15 +238,62 @@ mod tests {
     }
 
     #[test]
+    fn empty_hypothesis_keeps_previous_tentative() {
+        let mut hb = HypothesisBuffer::new();
+        let tentative = vec![w(0.0, 0.5, "maybe"), w(0.5, 1.0, "later")];
+        hb.insert(tentative.clone(), 0.0);
+        hb.flush();
+
+        hb.insert(Vec::new(), 0.0);
+        let committed = hb.flush();
+
+        assert!(committed.is_empty());
+        assert_eq!(hb.buffer, tentative);
+    }
+
+    #[test]
     fn drops_words_before_last_committed_time() {
         let mut hb = HypothesisBuffer::new();
         hb.last_committed_time = 5.0;
-        // 4.5 < 5.0 - 0.1 -> drop. 4.95 > 4.9 -> keep. 6.0 -> keep.
+        // old ends before 5.0 - 0.1 -> drop. edge and new end after -> keep.
         hb.insert(
             vec![w(4.5, 4.7, "old"), w(4.95, 5.2, "edge"), w(6.0, 6.5, "new")],
             0.0,
         );
         assert_eq!(hb.new, vec![w(4.95, 5.2, "edge"), w(6.0, 6.5, "new")]);
+    }
+
+    #[test]
+    fn keeps_words_that_overlap_last_committed_time() {
+        let mut hb = HypothesisBuffer::new();
+        hb.last_committed_time = 5.0;
+
+        hb.insert(
+            vec![
+                w(4.0, 4.8, "old"),
+                w(4.7, 5.4, "overlap"),
+                w(5.4, 5.9, "next"),
+            ],
+            0.0,
+        );
+
+        assert_eq!(hb.new, vec![w(4.7, 5.4, "overlap"), w(5.4, 5.9, "next")]);
+    }
+
+    #[test]
+    fn drops_hypotheses_mostly_inside_committed_region() {
+        let mut hb = HypothesisBuffer::new();
+        hb.last_committed_time = 2.0;
+
+        hb.insert(
+            vec![
+                w(0.0, 2.36, "corrected duplicate"),
+                w(2.14, 5.78, "next phrase"),
+            ],
+            0.0,
+        );
+
+        assert_eq!(hb.new, vec![w(2.14, 5.78, "next phrase")]);
     }
 
     #[test]
