@@ -2,7 +2,7 @@
 name = "yamabiko-whisper"
 version = "0.2.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Low-latency streaming speech recognition with whisper.cpp and LocalAgreement-2."
 license = "MIT"
 repository = "https://github.com/ayakashi-labs/yamabiko-whisper"

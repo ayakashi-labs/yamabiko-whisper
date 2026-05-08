@@ -291,14 +291,22 @@ impl AsrPipeline {
 mod tests {
     use super::*;
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.0001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn downmixes_stereo_i16_to_mono_f32() {
         let samples = [i16::MAX, 0, 0, i16::MIN];
 
         let mono = downmix_interleaved(&samples, 2);
 
-        assert!((mono[0] - 0.5).abs() < 0.0001);
-        assert!((mono[1] + 0.5).abs() < 0.0001);
+        assert_eq!(mono.len(), 2);
+        assert_close(mono[0], 0.5);
+        assert_close(mono[1], -0.5);
     }
 
     #[test]
@@ -314,6 +322,26 @@ mod tests {
         let input = vec![0.0, 0.25, -0.25];
 
         assert_eq!(resampler.process(&input), input);
+    }
+
+    #[test]
+    fn resampler_downsamples_by_ratio() {
+        let mut resampler = LinearResampler::new(8, 4).unwrap();
+
+        let output = resampler.process(&[0.0, 1.0, 2.0, 3.0, 4.0]);
+
+        assert_eq!(output, vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn resampler_interpolates_across_chunk_boundaries() {
+        let mut resampler = LinearResampler::new(2, 4).unwrap();
+
+        let first = resampler.process(&[0.0, 1.0, 2.0]);
+        let second = resampler.process(&[3.0, 4.0]);
+
+        assert_eq!(first, vec![0.0, 0.5, 1.0, 1.5]);
+        assert_eq!(second, vec![2.0, 2.5, 3.0, 3.5]);
     }
 
     #[test]
