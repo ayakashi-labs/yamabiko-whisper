@@ -70,6 +70,14 @@ yamabiko-whisper = { version = "0.2", features = ["cuda"] }
 ネイティブ依存関係を用意してください。例として、`vulkan`にはVulkan SDK、`cuda`にはCUDA Toolkitが必要です。
 どちらもCMakeが必要です。
 
+Windowsでは、`vulkan` build時に`whisper-rs-sys`内部のパスが長くなり、CMakeのパス長制限に当たる場合があります。
+その場合は、ローカルの`.cargo/config.toml`で短いtarget directoryを指定してください。
+
+```toml
+[build]
+target-dir = "C:\\t"
+```
+
 GPU backendを有効にした場合、`BackendConfig::default()`は`whisper-rs`のGPU利用デフォルトに従います。
 デバイスIDを選ぶ、またはCPU実行へ戻す場合は、`OnlineAsrModel::load_with_backend`を使います。
 

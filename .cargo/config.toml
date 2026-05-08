@@ -1,4 +1,0 @@
-# whisper-rs-sys の vulkan-shaders-gen 内部パスが CMake の 250 文字制限を超えるため短縮
-# Shorten target dir; vulkan-shaders-gen internal paths exceed CMake's 250-char limit.
-[build]
-target-dir = "C:\\t"

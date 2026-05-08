@@ -77,6 +77,15 @@ Available pass-through features are `cuda`, `vulkan`, `metal`, `coreml`,
 dependencies needed by `whisper-rs` and whisper.cpp for the selected backend
 (for example, Vulkan SDK for `vulkan`, CUDA Toolkit for `cuda`, plus CMake).
 
+On Windows, `vulkan` builds can hit CMake path length limits inside
+`whisper-rs-sys`. If that happens, create a local `.cargo/config.toml` to use a
+short target directory:
+
+```toml
+[build]
+target-dir = "C:\\t"
+```
+
 When a GPU backend is compiled in, `BackendConfig::default()` follows the
 `whisper-rs` default for GPU use. Use `OnlineAsrModel::load_with_backend` to
 select a device or force CPU execution:
