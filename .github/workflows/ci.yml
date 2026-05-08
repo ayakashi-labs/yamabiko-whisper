@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libasound2-dev
+
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+
+      - name: Format
+        run: cargo +1.88.0 fmt --check
+
+      - name: Check
+        run: cargo +1.88.0 check --all-targets
+
+      - name: Test
+        run: cargo +1.88.0 test --all-targets
