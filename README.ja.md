@@ -6,7 +6,7 @@ Rust向けの低遅延ストリーミング音声認識クレートです。
 [`whisper-rs`](https://crates.io/crates/whisper-rs)、whisper.cpp、Silero VAD、
 ストリーミングWhisper研究で使われているLocalAgreement-2方式を利用しています。
 
-0.2では、VADを使う構成を必須の利用導線とします。GGML形式のWhisperモデルと
+0.2以降では、VADを使う構成を必須の利用導線とします。GGML形式のWhisperモデルと
 GGML形式のSilero VADモデルを読み込み、VAD付きprocessorを作成して、`AsrPipeline`へ音声を渡します。
 `AsrPipeline`はサンプル正規化、チャンネルのダウンミックス、16 kHzへのリサンプリング、チャンク化を行い、
 確定単語とライブ表示用の未確定仮説を返します。
@@ -35,7 +35,7 @@ featureを公開しています。
 ## example
 
 推奨する実装の参照先は[`examples/streaming_mic.rs`](https://github.com/ayakashi-labs/yamabiko-whisper/blob/main/examples/streaming_mic.rs)です。
-このexampleでは、0.2で想定する流れとして、2つのモデル読み込み、VAD付きprocessorの作成、`cpal`による
+このexampleでは、現在想定する流れとして、2つのモデル読み込み、VAD付きprocessorの作成、`cpal`による
 デフォルトマイク入力、`AsrPipeline`への投入、確定単語の出力、未確定行の表示までを扱っています。
 
 ```bash

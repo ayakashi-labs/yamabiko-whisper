@@ -6,10 +6,10 @@ Low-latency streaming speech recognition for Rust, built on
 [`whisper-rs`](https://crates.io/crates/whisper-rs), whisper.cpp, Silero VAD,
 and the LocalAgreement-2 policy from streaming Whisper research.
 
-For 0.2, the supported usage path requires VAD. Load a GGML Whisper model and a
-GGML Silero VAD model, create a VAD-backed processor, and feed audio through
-`AsrPipeline`. The pipeline normalizes samples, downmixes channels, resamples to
-16 kHz, chunks audio, and returns committed words plus a tentative live
+Since 0.2, the supported usage path requires VAD. Load a GGML Whisper model and
+a GGML Silero VAD model, create a VAD-backed processor, and feed audio through
+`AsrPipeline`. The pipeline normalizes samples, downmixes channels, resamples
+to 16 kHz, chunks audio, and returns committed words plus a tentative live
 hypothesis.
 
 > Status: this crate is currently validated primarily with Japanese speech.
@@ -39,9 +39,9 @@ Model files are not bundled. Provide:
 
 The recommended reference implementation is
 [`examples/streaming_mic.rs`](https://github.com/ayakashi-labs/yamabiko-whisper/blob/main/examples/streaming_mic.rs).
-It shows the intended 0.2 flow: load both models, create a VAD-backed
-processor, capture the default microphone with `cpal`, feed `AsrPipeline`,
-print committed words, and render a tentative line.
+It shows the current flow: load both models, create a VAD-backed processor,
+capture the default microphone with `cpal`, feed `AsrPipeline`, print
+committed words, and render a tentative line.
 
 ```bash
 cargo run --release --features vulkan --example streaming_mic -- <model.bin> <language> <vad-model.bin>
