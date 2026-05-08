@@ -21,13 +21,14 @@ hypothesis.
 
 ```toml
 [dependencies]
-yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
+yamabiko-whisper = { version = "0.2", features = ["vulkan"] } # or ["cuda"]
 ```
 
 On Windows, the default `whisper-rs` backend can be extremely slow in optimized
 production builds. For production use, prefer an accelerated whisper.cpp backend
-such as Vulkan or CUDA. This crate currently exposes Vulkan through the
-`vulkan` feature.
+such as Vulkan or CUDA. This crate exposes the backend features provided by
+`whisper-rs`, including `cuda`, `vulkan`, `metal`, `coreml`, `hipblas`,
+`intel-sycl`, `openblas`, and `openmp`.
 
 Model files are not bundled. Provide:
 
@@ -61,13 +62,28 @@ side: create `OnlineAsrModel`, create `VadModel`, call
 By default, the crate builds the CPU backend exposed by `whisper-rs`.
 
 On Windows, that default backend may be too slow for production speech
-recognition. Use `vulkan` where possible, or a CUDA-enabled whisper.cpp /
-`whisper-rs` build if your deployment targets NVIDIA GPUs.
+recognition. Use `vulkan` where possible, or `cuda` if your deployment targets
+NVIDIA GPUs.
 
 ```toml
 [dependencies]
 yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
+# or
+yamabiko-whisper = { version = "0.2", features = ["cuda"] }
 ```
 
-Building with `vulkan` requires the native dependencies needed by `whisper-rs`
-and whisper.cpp, including a working Vulkan SDK and CMake.
+Available pass-through features are `cuda`, `vulkan`, `metal`, `coreml`,
+`hipblas`, `intel-sycl`, `openblas`, and `openmp`. They require the native
+dependencies needed by `whisper-rs` and whisper.cpp for the selected backend
+(for example, Vulkan SDK for `vulkan`, CUDA Toolkit for `cuda`, plus CMake).
+
+When a GPU backend is compiled in, `BackendConfig::default()` follows the
+`whisper-rs` default for GPU use. Use `OnlineAsrModel::load_with_backend` to
+select a device or force CPU execution:
+
+```rust
+use yamabiko_whisper::{BackendConfig, OnlineAsrModel};
+
+let backend = BackendConfig::default().with_gpu_device(1);
+let model = OnlineAsrModel::load_with_backend("ggml-large-v3-turbo.bin", backend)?;
+```

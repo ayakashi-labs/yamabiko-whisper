@@ -19,11 +19,12 @@ GGML形式のSilero VADモデルを読み込み、VAD付きprocessorを作成し
 
 ```toml
 [dependencies]
-yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
+yamabiko-whisper = { version = "0.2", features = ["vulkan"] } # または ["cuda"]
 ```
 
 Windowsでは、`whisper-rs`のデフォルトbackendを最適化済みの本番ビルドで使うと、音声認識が極端に遅くなることがあります。
-本番用途では、VulkanやCUDAなどの高速化backendを使うことを推奨します。このcrateでは、現時点で`vulkan`
+本番用途では、VulkanやCUDAなどの高速化backendを使うことを推奨します。このcrateでは、`whisper-rs`が提供する
+`cuda`、`vulkan`、`metal`、`coreml`、`hipblas`、`intel-sycl`、`openblas`、`openmp`
 featureを公開しています。
 
 モデルファイルは同梱されません。次の2つを用意してください。
@@ -55,12 +56,26 @@ cargo run --release --features vulkan --example streaming_mic -- ggml-large-v3-t
 デフォルトでは、`whisper-rs`が提供するCPUバックエンドでビルドします。
 
 Windowsでは、このデフォルトbackendだと本番の音声認識が極端に遅い場合があります。可能であれば`vulkan`を使ってください。
-NVIDIA GPU向けのデプロイでは、CUDA有効のwhisper.cpp / `whisper-rs` buildも回避策になります。
+NVIDIA GPU向けのデプロイでは、`cuda` featureを使えます。
 
 ```toml
 [dependencies]
 yamabiko-whisper = { version = "0.2", features = ["vulkan"] }
+# または
+yamabiko-whisper = { version = "0.2", features = ["cuda"] }
 ```
 
-`vulkan`を有効にしてビルドする場合は、`whisper-rs`とwhisper.cppが必要とするネイティブ依存関係が必要です。
-Vulkan SDKとCMakeが利用できる環境を用意してください。
+公開しているpass-through featureは、`cuda`、`vulkan`、`metal`、`coreml`、`hipblas`、`intel-sycl`、
+`openblas`、`openmp`です。選択したbackendに応じて、`whisper-rs`とwhisper.cppが必要とする
+ネイティブ依存関係を用意してください。例として、`vulkan`にはVulkan SDK、`cuda`にはCUDA Toolkitが必要です。
+どちらもCMakeが必要です。
+
+GPU backendを有効にした場合、`BackendConfig::default()`は`whisper-rs`のGPU利用デフォルトに従います。
+デバイスIDを選ぶ、またはCPU実行へ戻す場合は、`OnlineAsrModel::load_with_backend`を使います。
+
+```rust
+use yamabiko_whisper::{BackendConfig, OnlineAsrModel};
+
+let backend = BackendConfig::default().with_gpu_device(1);
+let model = OnlineAsrModel::load_with_backend("ggml-large-v3-turbo.bin", backend)?;
+```

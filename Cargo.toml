@@ -14,6 +14,13 @@ exclude = [".cargo/"]
 
 [features]
 default = []
+coreml = ["whisper-rs/coreml"]
+cuda = ["whisper-rs/cuda"]
+hipblas = ["whisper-rs/hipblas"]
+intel-sycl = ["whisper-rs/intel-sycl"]
+metal = ["whisper-rs/metal"]
+openblas = ["whisper-rs/openblas"]
+openmp = ["whisper-rs/openmp"]
 vulkan = ["whisper-rs/vulkan"]
 
 [dependencies]

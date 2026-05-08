@@ -37,6 +37,77 @@ pub const SAMPLE_RATE: usize = 16_000;
 const BUFFER_TRIMMING_SEC: f64 = 15.0;
 const PROMPT_CHAR_BUDGET: usize = 200;
 
+/// Runtime options for the compiled whisper.cpp backend.
+///
+/// The backend implementation is selected at build time with Cargo
+/// features such as `cuda`, `vulkan`, or `metal`. This config controls
+/// whether the loaded model uses GPU support from that compiled backend
+/// and which device is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendConfig {
+    /// Use GPU acceleration when the selected Cargo feature supports it.
+    pub use_gpu: bool,
+    /// GPU device id passed to whisper.cpp.
+    pub gpu_device: i32,
+    /// Enable whisper.cpp flash attention while loading the model.
+    pub flash_attn: bool,
+}
+
+impl BackendConfig {
+    /// Create a config matching `whisper-rs` defaults for the enabled
+    /// Cargo features.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Force CPU execution even when a GPU backend feature is enabled.
+    pub fn cpu() -> Self {
+        Self {
+            use_gpu: false,
+            gpu_device: 0,
+            flash_attn: false,
+        }
+    }
+
+    /// Enable or disable GPU use for the compiled backend.
+    pub fn with_use_gpu(mut self, use_gpu: bool) -> Self {
+        self.use_gpu = use_gpu;
+        self
+    }
+
+    /// Select the GPU device id used by whisper.cpp.
+    pub fn with_gpu_device(mut self, gpu_device: i32) -> Self {
+        self.gpu_device = gpu_device;
+        self
+    }
+
+    /// Enable or disable flash attention.
+    pub fn with_flash_attn(mut self, flash_attn: bool) -> Self {
+        self.flash_attn = flash_attn;
+        self
+    }
+
+    fn to_whisper(self) -> WhisperContextParameters<'static> {
+        let mut params = WhisperContextParameters::default();
+        params
+            .use_gpu(self.use_gpu)
+            .gpu_device(self.gpu_device)
+            .flash_attn(self.flash_attn);
+        params
+    }
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        let params = WhisperContextParameters::default();
+        Self {
+            use_gpu: params.use_gpu,
+            gpu_device: params.gpu_device,
+            flash_attn: params.flash_attn,
+        }
+    }
+}
+
 /// Whisper decoding strategy used for each streaming pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DecodingStrategy {
@@ -206,11 +277,16 @@ pub struct OnlineAsrModel {
 impl OnlineAsrModel {
     /// Load a Whisper model from disk.
     pub fn load<P: AsRef<Path>>(model_path: P) -> Result<Self, Error> {
-        let ctx = WhisperContext::new_with_params(
-            model_path.as_ref(),
-            WhisperContextParameters::default(),
-        )
-        .map_err(|e| Error::ModelLoad(e.to_string()))?;
+        Self::load_with_backend(model_path, BackendConfig::default())
+    }
+
+    /// Load a Whisper model from disk with explicit backend options.
+    pub fn load_with_backend<P: AsRef<Path>>(
+        model_path: P,
+        backend: BackendConfig,
+    ) -> Result<Self, Error> {
+        let ctx = WhisperContext::new_with_params(model_path.as_ref(), backend.to_whisper())
+            .map_err(|e| Error::ModelLoad(e.to_string()))?;
         Ok(Self { ctx: Arc::new(ctx) })
     }
 
@@ -268,6 +344,15 @@ impl VadModel {
         Self::load_with_config(model_path, VadConfig::default())
     }
 
+    /// Load a VAD model with default VAD settings and explicit backend
+    /// options. `flash_attn` is ignored by whisper.cpp's VAD context.
+    pub fn load_with_backend<P: AsRef<Path>>(
+        model_path: P,
+        backend: BackendConfig,
+    ) -> Result<Self, Error> {
+        Self::load_with_config_and_backend(model_path, VadConfig::default(), backend)
+    }
+
     /// Load a VAD model with explicit VAD settings.
     ///
     /// `config.n_threads` is applied while loading the VAD context; the
@@ -276,12 +361,26 @@ impl VadModel {
         model_path: P,
         config: VadConfig,
     ) -> Result<Self, Error> {
+        Self::load_with_config_and_backend(model_path, config, BackendConfig::cpu())
+    }
+
+    /// Load a VAD model with explicit VAD settings and backend options.
+    ///
+    /// Only `use_gpu` and `gpu_device` are applied to the VAD context;
+    /// `flash_attn` is a Whisper model option and has no VAD effect.
+    pub fn load_with_config_and_backend<P: AsRef<Path>>(
+        model_path: P,
+        config: VadConfig,
+        backend: BackendConfig,
+    ) -> Result<Self, Error> {
         let vad_path = model_path
             .as_ref()
             .to_str()
             .ok_or_else(|| Error::VadModelLoad("VAD model path is not valid UTF-8".to_string()))?;
         let mut vad_params = WhisperVadContextParams::default();
         vad_params.set_n_threads(config.n_threads.max(1));
+        vad_params.set_use_gpu(backend.use_gpu);
+        vad_params.set_gpu_device(backend.gpu_device);
         let ctx = WhisperVadContext::new(vad_path, vad_params)
             .map_err(|e| Error::VadModelLoad(e.to_string()))?;
         let silence_reset_samples =
@@ -358,11 +457,20 @@ pub struct OnlineAsrProcessor {
 impl OnlineAsrProcessor {
     /// Load a Whisper model from disk and create a streaming processor.
     /// `language` is the Whisper language code (`"en"`, `"ja"`, …) or
-    /// `"auto"` for autodetect. The model is loaded with default
-    /// `WhisperContextParameters`; GPU acceleration is controlled at
-    /// crate-feature build time.
+    /// `"auto"` for autodetect. The model is loaded with
+    /// [`BackendConfig::default`].
     pub fn from_model_path<P: AsRef<Path>>(model_path: P, language: &str) -> Result<Self, Error> {
         OnlineAsrModel::load(model_path)?.create_processor(language)
+    }
+
+    /// Load a Whisper model from disk with explicit backend options and
+    /// create a streaming processor.
+    pub fn from_model_path_with_backend<P: AsRef<Path>>(
+        model_path: P,
+        language: &str,
+        backend: BackendConfig,
+    ) -> Result<Self, Error> {
+        OnlineAsrModel::load_with_backend(model_path, backend)?.create_processor(language)
     }
 
     /// Load a Whisper model from disk and create a streaming processor
@@ -372,6 +480,16 @@ impl OnlineAsrProcessor {
         config: OnlineAsrConfig,
     ) -> Result<Self, Error> {
         OnlineAsrModel::load(model_path)?.create_processor_with_config(config)
+    }
+
+    /// Load a Whisper model from disk with explicit ASR settings and
+    /// backend options.
+    pub fn from_model_path_with_config_and_backend<P: AsRef<Path>>(
+        model_path: P,
+        config: OnlineAsrConfig,
+        backend: BackendConfig,
+    ) -> Result<Self, Error> {
+        OnlineAsrModel::load_with_backend(model_path, backend)?.create_processor_with_config(config)
     }
 
     /// Same as [`Self::from_model_path`] but additionally loads a Silero
@@ -733,6 +851,29 @@ fn default_n_threads() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_config_matches_whisper_defaults() {
+        let backend = BackendConfig::default();
+        let params = WhisperContextParameters::default();
+
+        assert_eq!(backend.use_gpu, params.use_gpu);
+        assert_eq!(backend.gpu_device, params.gpu_device);
+        assert_eq!(backend.flash_attn, params.flash_attn);
+    }
+
+    #[test]
+    fn backend_config_applies_runtime_options() {
+        let params = BackendConfig::cpu()
+            .with_use_gpu(true)
+            .with_gpu_device(2)
+            .with_flash_attn(true)
+            .to_whisper();
+
+        assert!(params.use_gpu);
+        assert_eq!(params.gpu_device, 2);
+        assert!(params.flash_attn);
+    }
 
     #[test]
     fn segment_cut_never_exceeds_last_committed_word() {
