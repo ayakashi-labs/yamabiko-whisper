@@ -29,7 +29,7 @@ jobs:
         run: cargo +1.88.0 fmt --check
 
       - name: Check
-        run: cargo +1.88.0 check --all-targets
+        run: cargo +1.88.0 check --locked --all-targets
 
       - name: Test
-        run: cargo +1.88.0 test --all-targets
+        run: cargo +1.88.0 test --locked --all-targets

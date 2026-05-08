@@ -238,6 +238,18 @@ mod tests {
     }
 
     #[test]
+    fn prefix_match_commits_changed_suffix() {
+        let mut hb = HypothesisBuffer::new();
+        hb.insert(vec![w(0.0, 0.4, "alpha"), w(0.4, 0.8, "beta")], 0.0);
+        hb.flush();
+
+        hb.insert(vec![w(0.0, 0.4, "alpha"), w(0.4, 0.8, "gamma")], 0.0);
+
+        assert_eq!(hb.flush(), vec![w(0.0, 0.4, "alpha")]);
+        assert_eq!(hb.buffer, vec![w(0.4, 0.8, "gamma")]);
+    }
+
+    #[test]
     fn empty_hypothesis_keeps_previous_tentative() {
         let mut hb = HypothesisBuffer::new();
         let tentative = vec![w(0.0, 0.5, "maybe"), w(0.5, 1.0, "later")];
@@ -318,6 +330,17 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_single_word_overlap() {
+        let mut hb = HypothesisBuffer::new();
+        hb.committed_in_buffer = vec![w(0.0, 0.5, "already"), w(0.5, 1.0, "seen")];
+        hb.last_committed_time = 1.0;
+
+        hb.insert(vec![w(1.1, 1.5, "seen"), w(1.5, 2.0, "next")], 0.0);
+
+        assert_eq!(hb.new, vec![w(1.5, 2.0, "next")]);
+    }
+
+    #[test]
     fn pop_committed_drops_old() {
         let mut hb = HypothesisBuffer::new();
         hb.committed_in_buffer = vec![w(0.0, 1.0, "a"), w(1.0, 2.0, "b"), w(2.0, 3.0, "c")];
@@ -332,5 +355,14 @@ mod tests {
         let snapshot = hb.complete();
         hb.buffer.clear();
         assert_eq!(snapshot, vec![w(0.0, 0.5, "a")]);
+    }
+
+    #[test]
+    fn drain_complete_clears_tentative_buffer() {
+        let mut hb = HypothesisBuffer::new();
+        hb.buffer = vec![w(0.0, 0.5, "final")];
+
+        assert_eq!(hb.drain_complete(), vec![w(0.0, 0.5, "final")]);
+        assert!(hb.complete().is_empty());
     }
 }
